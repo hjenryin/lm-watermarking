@@ -1,7 +1,7 @@
 spacy
 nltk
 scipy
-torch
+# torch
 datasets
 transformers
 sentence-transformers

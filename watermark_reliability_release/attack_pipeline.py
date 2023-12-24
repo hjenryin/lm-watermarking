@@ -34,9 +34,10 @@ from utils.attack import (
     tokenize_for_copy_paste,
     copy_paste_attack,
     scramble_attack,
+    general_paraphrase_attack,
 )
 
-print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
+# print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
 
 
 def main(args):
@@ -56,15 +57,11 @@ def main(args):
         if os.path.exists(gen_table_attacked_path):
             if not args.overwrite_output_file:
                 print(
-                    f"WARNING: Exiting to avoid overwriting output file. "
-                    f"Pass the '--overwrite_output_file' flag to ignore this check."
+                    f"WARNING: Exiting to avoid overwriting output file. " f"Pass the '--overwrite_output_file' flag to ignore this check."
                 )
                 exit()
             else:
-                print(
-                    f"WARNING: Found existing generation files with metrics added at this output dir. "
-                    f"Overwriting anyway :/"
-                )
+                print(f"WARNING: Found existing generation files with metrics added at this output dir. " f"Overwriting anyway :/")
     else:
         # create the output dir where run artifacts are stored
         os.makedirs(args.output_dir)
@@ -73,9 +70,7 @@ def main(args):
     # Parse attack_method arg
     ###########################################################################
     # check that attack method is supported
-    assert (
-        args.attack_method in SUPPORTED_ATTACK_METHODS
-    ), f"Unsupported attack '{args.attack_method}'"
+    assert args.attack_method in SUPPORTED_ATTACK_METHODS, f"Unsupported attack '{args.attack_method}'"
     print(f"Attack method: {args.attack_method}")
 
     ###########################################################################
@@ -87,12 +82,8 @@ def main(args):
     gen_table_path = f"{args.input_dir}/gen_table.jsonl"
     safe_gen_table_path = f"{args.input_dir}/gen_table_safe.jsonl"
 
-    assert os.path.exists(
-        gen_table_meta_path
-    ), f"failed file check for prev generations metadata json file: {gen_table_meta_path}"
-    assert os.path.exists(
-        gen_table_path
-    ), f"failed file check for prev generations jsonl file: {gen_table_path}"
+    assert os.path.exists(gen_table_meta_path), f"failed file check for prev generations metadata json file: {gen_table_meta_path}"
+    assert os.path.exists(gen_table_path), f"failed file check for prev generations jsonl file: {gen_table_path}"
     assert not os.path.exists(safe_gen_table_path), (
         f"failed for safety bc there is a secondary 'safe' marked file",
         f" in this dir indicating a possible issue with the generation step. ",
@@ -152,6 +143,7 @@ def main(args):
         print("Running GPT attack")
         import openai
 
+        openai.api_base = "https://api.chatanywhere.com.cn/v1"
         openai.api_key = os.environ["OPENAI_API_KEY"]
         prompt_pool = read_json("utils/prompts.json")["prompt_pool"]
         prompt_pool = {int(k): v for k, v in prompt_pool.items()}
@@ -167,10 +159,25 @@ def main(args):
             attack_prompt=attack_prompt,
             args=args,
         )
-        # gen_table_attacked_ds = gen_table_ds.map(
-        #     gpt_attack_partial, batched=False, num_proc=min(len(gen_table_ds), 16)
-        # )
+
         gen_table_attacked_ds = gen_table_ds.map(gpt_attack_partial, batched=False)
+
+    ###########################################################################
+    # Attack from general llm
+    ###########################################################################
+
+    elif args.attack_method == "general":
+        print("Running general attack")
+        prompt_pool = read_json("utils/prompts.json")["prompt_pool"]
+        prompt_pool = {int(k): v for k, v in prompt_pool.items()}
+
+        if args.attack_prompt is None:
+            attack_prompt = prompt_pool[args.attack_prompt_id]
+            args.attack_prompt = attack_prompt
+
+        print(f"Using attack prompt: {attack_prompt}")
+
+        gen_table_attacked_ds = general_paraphrase_attack(gen_table_ds, attack_prompt, args=args)
 
     ###########################################################################
     # DIPPER attack
@@ -179,9 +186,7 @@ def main(args):
     elif args.attack_method == "dipper":
         print("Running DIPPER attack")
         print(f"Using lexical diversity: {args.lex}, order diversity: {args.order}")
-        gen_table_attacked_ds = dipper_attack(
-            gen_table_ds, lex=args.lex, order=args.order, args=args
-        )
+        gen_table_attacked_ds = dipper_attack(gen_table_ds, lex=args.lex, order=args.order, args=args)
 
     ###########################################################################
     # Scramble attack
@@ -217,19 +222,14 @@ def main(args):
             # effectively how much of the source col "remains", accounting for
             # the number of insertions that will be made to total this length
             args.cp_attack_insertion_len = (
-                int((int(args.cp_attack_insertion_len[:-1]) / 100) * args.max_new_tokens)
-                // args.cp_attack_num_insertions
+                int((int(args.cp_attack_insertion_len[:-1]) / 100) * args.max_new_tokens) // args.cp_attack_num_insertions
             )
             # check that this is not more than args.max_new_tokens total
-            assert (
-                args.cp_attack_insertion_len * args.cp_attack_num_insertions <= args.max_new_tokens
-            ) and (
+            assert (args.cp_attack_insertion_len * args.cp_attack_num_insertions <= args.max_new_tokens) and (
                 args.cp_attack_insertion_len * args.cp_attack_num_insertions > 0
             ), f"Invalid attack strength: {original_len_str} for {args.cp_attack_num_insertions} insertions."
 
-            args.cp_attack_effective_attack_percentage = (
-                1 - (int(original_len_str[:-1]) / 100)
-            ) * 100
+            args.cp_attack_effective_attack_percentage = (1 - (int(original_len_str[:-1]) / 100)) * 100
             print(
                 f"Effective attack percentage is 1-{original_len_str}={args.cp_attack_effective_attack_percentage}% by "
                 f"copying {args.cp_attack_num_insertions} x {args.cp_attack_insertion_len} = {args.cp_attack_num_insertions * args.cp_attack_insertion_len} tokens "
@@ -238,11 +238,7 @@ def main(args):
         else:
             args.cp_attack_insertion_len = int(args.cp_attack_insertion_len)
             args.cp_attack_effective_attack_percentage = (
-                1
-                - (
-                    (args.cp_attack_insertion_len * args.cp_attack_num_insertions)
-                    / args.max_new_tokens
-                )
+                1 - ((args.cp_attack_insertion_len * args.cp_attack_num_insertions) / args.max_new_tokens)
             ) * 100
             print(
                 f"Effective attack percentage is {args.cp_attack_effective_attack_percentage}% by "
@@ -304,9 +300,7 @@ def main(args):
         # log the raw tabular data
         # but also include the dataset index as a column
         series_column_names.remove("idx")
-        table = wandb.Table(
-            dataframe=gen_table_attacked_ds.remove_columns(series_column_names).to_pandas()
-        )
+        table = wandb.Table(dataframe=gen_table_attacked_ds.remove_columns(series_column_names).to_pandas())
         run.log({"output_table": table})
 
         # finish the wandb run
@@ -480,6 +474,36 @@ if __name__ == "__main__":
         default="no_wm_output",
         help="Destination column for the copy-paste attack.",
     )
+    parser.add_argument(
+        "--length_align_strength",
+        type=float,
+        default=1.0,
+        help="The strength of the length alignment penalty, 1.0 for no penalty",
+    )
+    parser.add_argument(
+        "--paraphrase_ngram_horizon",
+        type=int,
+        default=5,
+        help="The horizon for ngram paraphrase penalty",
+    )
+    parser.add_argument(
+        "--paraphrase_ngram_penalty",
+        type=float,
+        default=0.0,
+        help="The penalty for ngram paraphrases",
+    )
+    parser.add_argument(
+        "--attack_repetition_penalty",
+        type=float,
+        default=1.0,
+        help="The repetition penalty for generation()",
+    )
+    parser.add_argument(
+        "--attack_length_penalty",
+        type=float,
+        default=1.0,
+        help="The length penalty for generation()",
+    )
     args = parser.parse_args()
 
     ###########################################################################
@@ -493,9 +517,7 @@ if __name__ == "__main__":
         args.output_dir = args.input_dir
 
     # check limit_rows
-    assert (args.limit_rows is None) or (
-        (args.limit_rows > 0) and isinstance(args.limit_rows, int)
-    ), "limit_rows must be > 0 or None"
+    assert (args.limit_rows is None) or ((args.limit_rows > 0) and isinstance(args.limit_rows, int)), "limit_rows must be > 0 or None"
 
     # split wandb tags
     if args.wandb_tags != "":

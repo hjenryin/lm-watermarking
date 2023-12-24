@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from utils.submitit import str2bool
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from torch.nn import CrossEntropyLoss
 import torch
 import numpy as np
 
@@ -81,10 +84,11 @@ SUPPORTED_METRICS = [
 
 # These are the output text columns we want to compute metrics on
 OUTPUT_TEXT_COLUMN_NAMES = [
-    "baseline_completion",
-    "no_wm_output",
-    "w_wm_output",
+    # "baseline_completion",
+    # "no_wm_output",
+    # "w_wm_output",
     "w_wm_output_attacked",
+    "w_wm_output_attacked_baseline",
 ]
 
 # etc for other evaluation types
@@ -96,11 +100,12 @@ COHERENCE_TEXT_COLUMN_NAMES = ["truncated_input"] + OUTPUT_TEXT_COLUMN_NAMES
 
 # These are the column pairs we want to compute p-sp for
 OUTPUT_TEXT_PAIR_COLUMN_NAMES = [
-    ["baseline_completion", "no_wm_output"],
-    ["baseline_completion", "w_wm_output"],
-    ["baseline_completion", "w_wm_output_attacked"],
-    ["no_wm_output", "w_wm_output"],
+    # ["baseline_completion", "no_wm_output"],
+    # ["baseline_completion", "w_wm_output"],
+    # ["baseline_completion", "w_wm_output_attacked"],
+    # ["no_wm_output", "w_wm_output"],
     ["w_wm_output", "w_wm_output_attacked"],
+    ["w_wm_output", "w_wm_output_attacked_baseline"],
 ]
 
 P_SP_TEXT_PAIR_COLUMN_NAMES = OUTPUT_TEXT_PAIR_COLUMN_NAMES
@@ -142,7 +147,8 @@ def concat_rows(examples, tokenizer=None, args=None):
     for col_name in OUTPUT_TEXT_COLUMN_NAMES:
         if col_name in examples:
             examples[f"{col_name}_length"] = len(
-                tokenizer(examples[col_name], add_special_tokens=False)["input_ids"]
+                tokenizer(examples[col_name], add_special_tokens=False)[
+                    "input_ids"]
             )
     return examples
 
@@ -249,6 +255,9 @@ def compute_z_scores(example, watermark_detector=None, args=None):
             example = compute_z_score(
                 example, text_column_name=col_name, watermark_detector=watermark_detector, args=args
             )
+        else:
+            raise ValueError(
+                f"Column name {col_name} not in example, but should be")
     return example
 
 
@@ -273,7 +282,8 @@ def compute_run_len_chisqrd_stat(
     text_column_name=None,
     bool_arr_suffix=None,
     bool_arr=None,
-    watermark_detector=None,  # unused under the "z-score required to be run first" assumption
+    # unused under the "z-score required to be run first" assumption
+    watermark_detector=None,
     args=None,
     force_error=False,
 ):
@@ -319,11 +329,13 @@ def compute_run_len_chisqrd_stat(
             else:
                 score_dict = T_and_F_runs_dummy_dict_no_bins
         else:
-            raise ValueError("Unknown run length test variant and return_bin_counts setting")
+            raise ValueError(
+                "Unknown run length test variant and return_bin_counts setting")
 
     # replace every key name in score dict with the text_column_name + key name
     # and then add them to the example dict
-    score_dict = {text_column_name + "_run_len_chisqrd_" + k: v for k, v in score_dict.items()}
+    score_dict = {text_column_name + "_run_len_chisqrd_" +
+                  k: v for k, v in score_dict.items()}
     example.update(score_dict)
 
     return example
@@ -400,17 +412,14 @@ def load_oracle_model(args):
     return oracle_model, oracle_tokenizer, device
 
 
-from torch.nn import CrossEntropyLoss
-from transformers.modeling_outputs import CausalLMOutputWithPast
-
-
 def opt_unpooled_loss(logits, labels, model):
     # Shift so that tokens < n predict n
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
     # Flatten the tokens
     loss_fct = CrossEntropyLoss(reduction="none")
-    loss = loss_fct(shift_logits.view(-1, model.config.vocab_size), shift_labels.view(-1))
+    loss = loss_fct(
+        shift_logits.view(-1, model.config.vocab_size), shift_labels.view(-1))
     loss = loss.reshape(shift_logits.shape[:-1])
     # compute the mean for each elm in batch where the label is not pad
     # we assume the losses are zero for pad indices
@@ -431,7 +440,8 @@ def get_unpool_fn(model_name):
     if "opt" in model_name:
         return UNPOOL_FN_TABLE["opt"]
     else:
-        raise NotImplementedError(f"unpooling function not implemented for {model_name}")
+        raise NotImplementedError(
+            f"unpooling function not implemented for {model_name}")
 
 
 def compute_ppl_batch(
@@ -450,7 +460,8 @@ def compute_ppl_batch(
             completion_length=0,
             hf_model_name=oracle_model_name,
             tokenizer=oracle_tokenizer,
-            truncate_left=True,  # we add this to cover if the generation is longer than the oracle's max length
+            # we add this to cover if the generation is longer than the oracle's max length
+            truncate_left=True,
             model_max_length=oracle_model.config.max_position_embeddings,
         )["input_ids"]
 
@@ -463,20 +474,25 @@ def compute_ppl_batch(
         )["input_ids"]
 
         tokd_labels = tokd_prefix.clone().detach()
-        tokd_labels[:, : tokd_labels.shape[1] - tokd_suffix.shape[1] + 1] = -100
+        tokd_labels[:, : tokd_labels.shape[1] -
+                    tokd_suffix.shape[1] + 1] = -100
 
         inputs.append(tokd_prefix)
         labels.append(tokd_labels)
 
-    inputs = collate_batch(input_ids=inputs, collator=data_collator).to(oracle_model.device)
-    labels = collate_batch(input_ids=labels, collator=data_collator).to(oracle_model.device)
+    inputs = collate_batch(input_ids=inputs, collator=data_collator).to(
+        oracle_model.device)
+    labels = collate_batch(input_ids=labels, collator=data_collator).to(
+        oracle_model.device)
 
-    labels[labels == oracle_tokenizer.pad_token_id] = -100  # mask out pad tokens for loss
+    labels[labels == oracle_tokenizer.pad_token_id] = - \
+        100  # mask out pad tokens for loss
 
     with torch.no_grad():
         pooled_outputs = oracle_model(input_ids=inputs, labels=labels)
 
-        outputs = get_unpool_fn(oracle_model_name)(pooled_outputs.logits, labels, oracle_model)
+        outputs = get_unpool_fn(oracle_model_name)(
+            pooled_outputs.logits, labels, oracle_model)
         loss = (
             outputs.loss
         )  # avg CE loss all sequence positions (except where labels -100, i.e. pad)
@@ -501,6 +517,8 @@ def evaluate_ppl(
     w_wm_outputs = []
     inputs_plus_w_wm_output_attackeds = []
     w_wm_output_attackeds = []
+    inputs_plus_w_wm_output_attacked_baselines = []
+    w_wm_output_attacked_baselines = []
 
     for idx in range(len(examples["truncated_input"])):
         # pull out the required fields from the pipeline results
@@ -525,6 +543,12 @@ def evaluate_ppl(
             )
             w_wm_output_attacked = f"{examples['w_wm_output_attacked'][idx]}"
 
+        if "w_wm_output_attacked_baseline" in examples:
+            inputs_plus_w_wm_output_attacked_baseline = (
+                f"{examples['truncated_input'][idx]}{examples['w_wm_output_attacked_baseline'][idx]}"
+            )
+            w_wm_output_attacked_baseline = f"{examples['w_wm_output_attacked_baseline'][idx]}"
+
         # add to lists
         inputs_plus_baseline_outputs.append(inputs_plus_baseline_output)
         baseline_outputs.append(baseline_output)
@@ -533,8 +557,15 @@ def evaluate_ppl(
         inputs_plus_w_wm_outputs.append(inputs_plus_w_wm_output)
         w_wm_outputs.append(w_wm_output)
         if "w_wm_output_attacked" in examples:
-            inputs_plus_w_wm_output_attackeds.append(inputs_plus_w_wm_output_attacked)
+            inputs_plus_w_wm_output_attackeds.append(
+                inputs_plus_w_wm_output_attacked)
             w_wm_output_attackeds.append(w_wm_output_attacked)
+
+        if "w_wm_output_attacked_baseline" in examples:
+            inputs_plus_w_wm_output_attacked_baselines.append(
+                inputs_plus_w_wm_output_attacked_baseline)
+            w_wm_output_attacked_baselines.append(
+                w_wm_output_attacked_baseline)
 
     # add metrics
     loss, ppl = compute_ppl_batch(
@@ -582,6 +613,18 @@ def evaluate_ppl(
         examples["w_wm_output_attacked_loss"] = loss
         examples["w_wm_output_attacked_ppl"] = ppl
 
+    if "w_wm_output_attacked_baseline" in examples:
+        loss, ppl = compute_ppl_batch(
+            inputs_plus_w_wm_output_attacked_baselines,
+            w_wm_output_attacked_baselines,
+            oracle_model_name,
+            oracle_model,
+            oracle_tokenizer,
+            data_collator=data_collator,
+        )
+        examples["w_wm_output_attacked_baseline_loss"] = loss
+        examples["w_wm_output_attacked_baseline_ppl"] = ppl
+
     return examples
 
 
@@ -589,7 +632,8 @@ def compute_repetition_diversity(example, include_repetition=False, include_dive
     for col_name in REPETITION_TEXT_COLUMN_NAMES:
         if col_name in example:
             try:
-                results_tuple = measure_repetition_and_diversity(example[col_name])
+                results_tuple = measure_repetition_and_diversity(
+                    example[col_name])
             except Exception as e:
                 print(
                     f"Error for '{col_name}' computing repetition and diversity on text: '{example[col_name]}'\nError:{e}"
@@ -599,7 +643,8 @@ def compute_repetition_diversity(example, include_repetition=False, include_dive
             if include_repetition:
                 # returns pred_seq_2, pred_seq_3, pred_seq_4, pred_div
                 # add each key from the result tuple to the example, prepending the col_name
-                metrics_dict = {f"{col_name}_{key}": value for key, value in results_tuple.items()}
+                metrics_dict = {f"{col_name}_{key}": value for key,
+                                value in results_tuple.items()}
                 example.update(metrics_dict)
             if include_diversity:
                 # returns diversity only
@@ -611,13 +656,16 @@ def compute_repetition_diversity(example, include_repetition=False, include_dive
 def compute_p_sp(dataset):
     for column_pair in P_SP_TEXT_PAIR_COLUMN_NAMES:
         if column_pair[0] in dataset.features and column_pair[1] in dataset.features:
-            p_sp_scores = evaluate_p_sp(dataset[column_pair[0]], dataset[column_pair[1]])
+            p_sp_scores = evaluate_p_sp(
+                dataset[column_pair[0]], dataset[column_pair[1]])
             if f"{column_pair[0]}_vs_{column_pair[1]}_p_sp" in dataset.features:
                 print(
                     f"WARNING: Removing existing {column_pair[0]}_vs_{column_pair[1]}_p_sp column because it was already present"
                 )
-                dataset = dataset.remove_columns([f"{column_pair[0]}_vs_{column_pair[1]}_p_sp"])
-            dataset = dataset.add_column(f"{column_pair[0]}_vs_{column_pair[1]}_p_sp", p_sp_scores)
+                dataset = dataset.remove_columns(
+                    [f"{column_pair[0]}_vs_{column_pair[1]}_p_sp"])
+            dataset = dataset.add_column(
+                f"{column_pair[0]}_vs_{column_pair[1]}_p_sp", p_sp_scores)
     return dataset
 
 
@@ -629,14 +677,17 @@ def compute_mauve(dataset):
     """
     for column_pair in MAUVE_TEXT_PAIR_COLUMN_NAMES:
         if column_pair[0] in dataset.features and column_pair[1] in dataset.features:
-            mauve_score = get_mauve_score(dataset[column_pair[0]], dataset[column_pair[1]])
+            mauve_score = get_mauve_score(
+                dataset[column_pair[0]], dataset[column_pair[1]])
             if f"{column_pair[0]}_vs_{column_pair[1]}_mauve" in dataset.features:
                 print(
                     f"WARNING: Removing existing {column_pair[0]}_vs_{column_pair[1]}_mauve column because it was already present"
                 )
-                dataset = dataset.remove_columns([f"{column_pair[0]}_vs_{column_pair[1]}_mauve"])
+                dataset = dataset.remove_columns(
+                    [f"{column_pair[0]}_vs_{column_pair[1]}_mauve"])
             dataset = dataset.add_column(
-                f"{column_pair[0]}_vs_{column_pair[1]}_mauve", [mauve_score] * len(dataset)
+                f"{column_pair[0]}_vs_{column_pair[1]}_mauve", [
+                    mauve_score] * len(dataset)
             )
     return dataset
 
@@ -651,14 +702,17 @@ def compute_coherence(dataset):
     prefix_column = dataset[COHERENCE_TEXT_COLUMN_NAMES[0]]
     for generated_text_column in COHERENCE_TEXT_COLUMN_NAMES[1:]:
         if generated_text_column in dataset.features:
-            coherence_score = get_coherence_score(prefix_column, dataset[generated_text_column])
+            coherence_score = get_coherence_score(
+                prefix_column, dataset[generated_text_column])
             if f"{generated_text_column}_coherence" in dataset.features:
                 print(
                     f"WARNING: Removing existing {generated_text_column}_coherence column because it was already present"
                 )
-                dataset = dataset.remove_columns([f"{generated_text_column}_coherence"])
+                dataset = dataset.remove_columns(
+                    [f"{generated_text_column}_coherence"])
             dataset = dataset.add_column(
-                f"{generated_text_column}_coherence", [coherence_score] * len(dataset)
+                f"{generated_text_column}_coherence", [
+                    coherence_score] * len(dataset)
             )
     return dataset
 
@@ -671,34 +725,42 @@ def compute_detect_retrieval(dataset, args=None):
     if "w_wm_output_attacked" not in dataset.features:
         # were faking it
         was_real_attacked_ds = False
-        dataset = dataset.add_column("w_wm_output_attacked", dataset[args.retrieval_db_column])
+        dataset = dataset.add_column(
+            "w_wm_output_attacked", dataset[args.retrieval_db_column])
         dataset = dataset.add_column(
             "w_wm_output_attacked_length", dataset[f"{args.retrieval_db_column}_length"]
         )
 
-    human_detect, paraphrase_detect, generation_detect = detect_retrieval(dataset, args=args)
+    human_detect, paraphrase_detect, generation_detect = detect_retrieval(
+        dataset, args=args)
 
     if f"baseline_completion_retrieval_score" in dataset.features:
         print(
             f"WARNING: Removing existing baseline_completion_retrieval_score column because it was already present"
         )
-        dataset = dataset.remove_columns(["baseline_completion_retrieval_score"])
-    dataset = dataset.add_column(f"baseline_completion_retrieval_score", human_detect)
+        dataset = dataset.remove_columns(
+            ["baseline_completion_retrieval_score"])
+    dataset = dataset.add_column(
+        f"baseline_completion_retrieval_score", human_detect)
 
     if f"{args.retrieval_db_column}_retrieval_score" in dataset.features:
         print(
             f"WARNING: Removing existing {args.retrieval_db_column}_retrieval_score column because it was already present"
         )
-        dataset = dataset.remove_columns([f"{args.retrieval_db_column}_retrieval_score"])
-    dataset = dataset.add_column(f"{args.retrieval_db_column}_retrieval_score", generation_detect)
+        dataset = dataset.remove_columns(
+            [f"{args.retrieval_db_column}_retrieval_score"])
+    dataset = dataset.add_column(
+        f"{args.retrieval_db_column}_retrieval_score", generation_detect)
 
     if was_real_attacked_ds:
         if f"w_wm_output_attacked_retrieval_score" in dataset.features:
             print(
                 f"WARNING: Removing existing w_wm_output_attacked_retrieval_score column because it was already present"
             )
-            dataset = dataset.remove_columns(["w_wm_output_attacked_retrieval_score"])
-        dataset = dataset.add_column(f"w_wm_output_attacked_retrieval_score", paraphrase_detect)
+            dataset = dataset.remove_columns(
+                ["w_wm_output_attacked_retrieval_score"])
+        dataset = dataset.add_column(
+            f"w_wm_output_attacked_retrieval_score", paraphrase_detect)
         # else this is a dummy column, so delete it
     else:
         # sanity check that the scores are the same for the dummy column and the original
@@ -708,11 +770,9 @@ def compute_detect_retrieval(dataset, args=None):
                 for s1, s2 in zip(paraphrase_detect, generation_detect)
             ]
         )
-        dataset = dataset.remove_columns(["w_wm_output_attacked", "w_wm_output_attacked_length"])
+        dataset = dataset.remove_columns(
+            ["w_wm_output_attacked", "w_wm_output_attacked_length"])
     return dataset
-
-
-from utils.submitit import str2bool
 
 
 def scheme_hparam_extractor(x):

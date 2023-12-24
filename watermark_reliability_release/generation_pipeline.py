@@ -19,8 +19,13 @@ import argparse
 from functools import partial
 from tqdm import tqdm
 import wandb
+import torch
+from torch import fx
 
-print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
+# help(torch.fx.wrap)
+# exit()
+
+# print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
 
 # HF classses
 from transformers import LogitsProcessorList, DataCollatorWithPadding
@@ -109,9 +114,7 @@ def main(args):
         # truncate_input_for_prompt is a bool flag, that is set by
         # the dataset loading function, semi-redundant, to make sure
         # people are very aware of which input data style they are using
-        assert (
-            args.truncate_input_for_prompt == False
-        ), "Cannot truncate input for prompt if 'no_truncation' strategy is specified"
+        assert args.truncate_input_for_prompt == False, "Cannot truncate input for prompt if 'no_truncation' strategy is specified"
         pass
     else:
         ValueError(f"Unknown input truncation strategy {args.input_truncation_strategy}")
@@ -131,9 +134,7 @@ def main(args):
     elif args.input_filtering_strategy == "completion_length":
         input_check_kwargs.update(dict(min_prompt_len=0, min_completion_len=args.max_new_tokens))
     elif args.input_filtering_strategy == "prompt_and_completion_length":
-        input_check_kwargs.update(
-            dict(min_prompt_len=args.min_prompt_tokens, min_completion_len=args.max_new_tokens)
-        )
+        input_check_kwargs.update(dict(min_prompt_len=args.min_prompt_tokens, min_completion_len=args.max_new_tokens))
     elif args.input_filtering_strategy == "no_filter":
         input_check_kwargs.update(dict(min_prompt_len=0, min_completion_len=0))
     else:
@@ -176,15 +177,15 @@ def main(args):
                 top_p=args.top_p,
                 typical_p=args.typical_p,
                 temperature=args.sampling_temp,
+                repetition_penalty=args.repetition_penalty,
             )
         )
     else:
-        gen_kwargs.update(dict(num_beams=args.num_beams))
+        gen_kwargs.update(dict(num_beams=args.num_beams,
+                repetition_penalty=args.repetition_penalty,))
 
     generate_without_watermark = partial(model.generate, **gen_kwargs)
-    generate_with_watermark = partial(
-        model.generate, logits_processor=LogitsProcessorList([watermark_processor]), **gen_kwargs
-    )
+    generate_with_watermark = partial(model.generate, logits_processor=LogitsProcessorList([watermark_processor]), **gen_kwargs)
 
     # construct the collator
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding=True, pad_to_multiple_of=8)
@@ -332,9 +333,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Run watermarked huggingface LM generation pipeline"
-    )
+    parser = argparse.ArgumentParser(description="Run watermarked huggingface LM generation pipeline")
     parser.add_argument(
         "--model_name_or_path",
         type=str,
@@ -498,6 +497,12 @@ if __name__ == "__main__":
         help="The number of beams to use where '1' is no beam search.",
     )
     parser.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=1.0,
+        help="The repetition penalty for transformer generation.",
+    )
+    parser.add_argument(
         "--generation_seed",
         type=int,
         default=None,
@@ -597,9 +602,7 @@ if __name__ == "__main__":
     # with the assumption that the
     if args.min_generations <= 0:
         args.min_generations = MAX_GENERATIONS
-        print(
-            f"Warning: min_generations is -1. A hardcoded value of {MAX_GENERATIONS} will be used to limit the generation loop."
-        )
+        print(f"Warning: min_generations is -1. A hardcoded value of {MAX_GENERATIONS} will be used to limit the generation loop.")
 
     if args.limit_indices is None:
         print("No limit_indices specified, pulling all examples from the dataset.")

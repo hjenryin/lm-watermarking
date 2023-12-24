@@ -38,26 +38,30 @@ from .data.wikitext import load_wikitext
 MAX_GENERATIONS = int(10000)  # Hardcoded max length to avoid infinite loop
 
 
-def load_model(args):
+def load_model(args,attack_model=False):
     """Load and return the model and tokenizer"""
+    if not attack_model:
+        model_name_or_path = args.model_name_or_path
+    else:
+        model_name_or_path = args.attack_model_name
 
     args.is_seq2seq_model = any(
-        [(model_type in args.model_name_or_path) for model_type in ["t5", "T0"]]
+        [(model_type in model_name_or_path.lower()) for model_type in ["t5", "t0"]]
     )
     args.is_decoder_only_model = any(
-        [(model_type in args.model_name_or_path) for model_type in ["gpt", "opt", "bloom", "llama"]]
+        [(model_type in model_name_or_path.lower()) for model_type in ["gpt", "opt", "bloom", "llama"]]
     )
     if args.is_seq2seq_model:
-        model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name_or_path)
     elif args.is_decoder_only_model:
         if args.load_fp16:
             model = AutoModelForCausalLM.from_pretrained(
-                args.model_name_or_path, torch_dtype=torch.float16, device_map="auto"
+                model_name_or_path, torch_dtype=torch.float16, device_map="auto"
             )
         else:
-            model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
     else:
-        raise ValueError(f"Unknown model type: {args.model_name_or_path}")
+        raise ValueError(f"Unknown model type: {model_name_or_path}")
 
     if args.use_gpu:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -76,19 +80,21 @@ def load_model(args):
             "Need to check how to handle padding for seq2seq models when calling generate"
         )
 
-    if "llama" in args.model_name_or_path:
+    if "llama" in model_name_or_path:
         tokenizer = LlamaTokenizer.from_pretrained(
-            args.model_name_or_path, padding_side=padding_side
+            model_name_or_path, padding_side=padding_side
         )
         model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
         model.config.bos_token_id = 1
         model.config.eos_token_id = 2
     else:
         tokenizer = AutoTokenizer.from_pretrained(
-            args.model_name_or_path, padding_side=padding_side
+            model_name_or_path, padding_side=padding_side
         )
-
-    args.model_max_length = model.config.max_position_embeddings
+    if hasattr(model.config, "max_position_embeddings"):
+        args.model_max_length = model.config.max_position_embeddings
+    else:
+        args.model_max_length =1024
 
     return model, tokenizer, device
 

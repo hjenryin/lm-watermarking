@@ -14,15 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import openai
 import random
+import time
+import openai
 
 from utils.dipper_attack_pipeline import generate_dipper_paraphrases
+from utils.general_paraphrase_attack import generate_paraphrase_paraphrase
 
 from utils.evaluation import OUTPUT_TEXT_COLUMN_NAMES
 from utils.copy_paste_attack import single_insertion, triple_insertion_single_len, k_insertion_t_len
 
-SUPPORTED_ATTACK_METHODS = ["gpt", "dipper", "copy-paste", "scramble"]
+SUPPORTED_ATTACK_METHODS = ["gpt", "dipper", "copy-paste", "scramble", "general"]
 
 
 def scramble_attack(example, tokenizer=None, args=None):
@@ -37,9 +39,7 @@ def scramble_attack(example, tokenizer=None, args=None):
             sentences = example[column].split(".")
             random.shuffle(sentences)
             example[f"{column}_attacked"] = ".".join(sentences)
-            example[f"{column}_attacked_length"] = len(
-                tokenizer(example[f"{column}_attacked"])["input_ids"]
-            )
+            example[f"{column}_attacked_length"] = len(tokenizer(example[f"{column}_attacked"])["input_ids"])
     return example
 
 
@@ -56,14 +56,24 @@ def gpt_attack(example, attack_prompt=None, args=None):
     attacker_query = attack_prompt + original_text
     query_msg = {"role": "user", "content": attacker_query}
 
+    # print("*" * 10)
+    # print(original_text)
+    # print("*" * 10)
+    # print(attack_prompt)
+    # print("*" * 10)
+    # print(example)
+    # exit()
+
     from tenacity import retry, stop_after_attempt, wait_random_exponential
 
     # https://github.com/openai/openai-cookbook/blob/main/examples/How_to_handle_rate_limits.ipynb
     @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(25))
     def completion_with_backoff(model, messages, temperature, max_tokens):
-        return openai.ChatCompletion.create(
-            model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
-        )
+        time.sleep(60)
+        result= openai.ChatCompletion.create(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+        # print(messages,result)
+        # exit()
+        return result
 
     outputs = completion_with_backoff(
         model=args.attack_model_name,
@@ -73,9 +83,7 @@ def gpt_attack(example, attack_prompt=None, args=None):
     )
 
     attacked_text = outputs.choices[0].message.content
-    assert (
-        len(outputs.choices) == 1
-    ), "OpenAI API returned more than one response, unexpected for length inference of the output"
+    assert len(outputs.choices) == 1, "OpenAI API returned more than one response, unexpected for length inference of the output"
     example["w_wm_output_attacked_length"] = outputs.usage.completion_tokens
     example["w_wm_output_attacked"] = attacked_text
     if args.verbose:
@@ -107,9 +115,7 @@ def check_output_column_lengths(example, min_len=0):
 def tokenize_for_copy_paste(example, tokenizer=None, args=None):
     for text_col in OUTPUT_TEXT_COLUMN_NAMES:
         if text_col in example:
-            example[f"{text_col}_tokd"] = tokenizer(
-                example[text_col], return_tensors="pt", add_special_tokens=False
-            )["input_ids"][0]
+            example[f"{text_col}_tokd"] = tokenizer(example[text_col], return_tensors="pt", add_special_tokens=False)["input_ids"][0]
     return example
 
 
@@ -165,9 +171,13 @@ def copy_paste_attack(example, tokenizer=None, args=None):
     else:
         raise ValueError(f"Invalid attack type: {args.cp_attack_type}")
 
-    example["w_wm_output_attacked"] = tokenizer.batch_decode(
-        [tokenized_attacked_output], skip_special_tokens=True
-    )[0]
+    example["w_wm_output_attacked"] = tokenizer.batch_decode([tokenized_attacked_output], skip_special_tokens=True)[0]
     example["w_wm_output_attacked_length"] = len(tokenized_attacked_output)
 
     return example
+
+
+def general_paraphrase_attack(data, attack_prompt=None, args=None):
+    assert attack_prompt, "Prompt must be provided for general paraphrase attack"
+    ds = generate_paraphrase_paraphrase(data, attack_prompt=attack_prompt, args=args)
+    return ds
