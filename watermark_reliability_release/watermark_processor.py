@@ -35,8 +35,10 @@ class WatermarkBase:
         vocab: list[int] = None,
         gamma: float = 0.5,
         delta: float = 2.0,
-        seeding_scheme: str = "simple_1",  # simple default, find more schemes in alternative_prf_schemes.py
-        select_green_tokens: bool = True,  # should always be the default if not running in legacy mode
+        # simple default, find more schemes in alternative_prf_schemes.py
+        seeding_scheme: str = "simple_1",
+        # should always be the default if not running in legacy mode
+        select_green_tokens: bool = True,
     ):
         # patch now that None could now maybe be passed as seeding_scheme
         if seeding_scheme is None:
@@ -69,10 +71,11 @@ class WatermarkBase:
             )
 
         prf_key = prf_lookup[self.prf_type](
-            input_ids[-self.context_width :], salt_key=self.hash_key
+            input_ids[-self.context_width:], salt_key=self.hash_key
         )
         # enable for long, interesting streams of pseudorandom numbers: print(prf_key)
-        self.rng.manual_seed(prf_key % (2**64 - 1))  # safeguard against overflow from long
+        # safeguard against overflow from long
+        self.rng.manual_seed(prf_key % (2**64 - 1))
 
     def _get_greenlist_ids(self, input_ids: torch.LongTensor) -> torch.LongTensor:
         """Seed rng based on local context width and use this information to generate ids on the green list."""
@@ -86,7 +89,7 @@ class WatermarkBase:
             greenlist_ids = vocab_permutation[:greenlist_size]  # new
         else:  # select green via red
             greenlist_ids = vocab_permutation[
-                (self.vocab_size - greenlist_size) :
+                (self.vocab_size - greenlist_size):
             ]  # legacy behavior
         return greenlist_ids
 
@@ -108,7 +111,8 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
         alpha = torch.exp(torch.tensor(self.delta)).item()
         gamma = self.gamma
 
-        self.z_value = ((1 - gamma) * (alpha - 1)) / (1 - gamma + (alpha * gamma))
+        self.z_value = ((1 - gamma) * (alpha - 1)) / \
+            (1 - gamma + (alpha * gamma))
         self.expected_gl_coef = (gamma * alpha) / (1 - gamma + (alpha * gamma))
 
         # catch for overflow when bias is "infinite"
@@ -161,7 +165,8 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
         To work efficiently, this function can switch between a number of rules for handling the distribution tail.
         These are not exposed by default.
         """
-        sorted_scores, greedy_predictions = scores.sort(dim=-1, descending=True)
+        sorted_scores, greedy_predictions = scores.sort(
+            dim=-1, descending=True)
 
         final_greenlist = []
         for idx, prediction_candidate in enumerate(greedy_predictions):
@@ -189,16 +194,19 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
         """Call with previous context as input_ids, and scores for next token."""
 
         # this is lazy to allow us to co-locate on the watermarked model's device
-        self.rng = torch.Generator(device=input_ids.device) if self.rng is None else self.rng
+        self.rng = torch.Generator(
+            device=input_ids.device) if self.rng is None else self.rng
 
         # NOTE, it would be nice to get rid of this batch loop, but currently,
         # the seed and partition operations are not tensor/vectorized, thus
         # each sequence in the batch needs to be treated separately.
 
-        list_of_greenlist_ids = [None for _ in input_ids]  # Greenlists could differ in length
+        # Greenlists could differ in length
+        list_of_greenlist_ids = [None for _ in input_ids]
         for b_idx, input_seq in enumerate(input_ids):
             if self.self_salt:
-                greenlist_ids = self._score_rejection_sampling(input_seq, scores[b_idx])
+                greenlist_ids = self._score_rejection_sampling(
+                    input_seq, scores[b_idx])
             else:
                 greenlist_ids = self._get_greenlist_ids(input_seq)
             list_of_greenlist_ids[b_idx] = greenlist_ids
@@ -206,8 +214,10 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
             # logic for computing and storing spike entropies for analysis
             if self.store_spike_ents:
                 if self.spike_entropies is None:
-                    self.spike_entropies = [[] for _ in range(input_ids.shape[0])]
-                self.spike_entropies[b_idx].append(self._compute_spike_entropy(scores[b_idx]))
+                    self.spike_entropies = [[]
+                                            for _ in range(input_ids.shape[0])]
+                self.spike_entropies[b_idx].append(
+                    self._compute_spike_entropy(scores[b_idx]))
 
         green_tokens_mask = self._calc_greenlist_mask(
             scores=scores, greenlist_token_ids=list_of_greenlist_ids
@@ -239,7 +249,8 @@ class WatermarkDetector(WatermarkBase):
         device: torch.device = None,
         tokenizer: Tokenizer = None,
         z_threshold: float = 4.0,
-        normalizers: list[str] = ["unicode"],  # or also: ["unicode", "homoglyphs", "truecase"]
+        # or also: ["unicode", "homoglyphs", "truecase"]
+        normalizers: list[str] = ["unicode"],
         ignore_repeated_ngrams: bool = False,
         **kwargs,
     ):
@@ -255,7 +266,8 @@ class WatermarkDetector(WatermarkBase):
 
         self.normalizers = []
         for normalization_strategy in normalizers:
-            self.normalizers.append(normalization_strategy_lookup(normalization_strategy))
+            self.normalizers.append(
+                normalization_strategy_lookup(normalization_strategy))
         self.ignore_repeated_ngrams = ignore_repeated_ngrams
 
     def dummy_detect(
@@ -323,7 +335,8 @@ class WatermarkDetector(WatermarkBase):
     def _get_ngram_score_cached(self, prefix: tuple[int], target: int):
         """Expensive re-seeding and sampling is cached."""
         # Handle with care, should ideally reset on __getattribute__ access to self.prf_type, self.context_width, self.self_salt, self.hash_key
-        greenlist_ids = self._get_greenlist_ids(torch.as_tensor(prefix, device=self.device))
+        greenlist_ids = self._get_greenlist_ids(
+            torch.as_tensor(prefix, device=self.device))
         return True if target in greenlist_ids else False
 
     def _score_ngrams_in_passage(self, input_ids: torch.Tensor):
@@ -343,7 +356,8 @@ class WatermarkDetector(WatermarkBase):
         for idx, ngram_example in enumerate(frequencies_table.keys()):
             prefix = ngram_example if self.self_salt else ngram_example[:-1]
             target = ngram_example[-1]
-            ngram_to_watermark_lookup[ngram_example] = self._get_ngram_score_cached(prefix, target)
+            ngram_to_watermark_lookup[ngram_example] = self._get_ngram_score_cached(
+                prefix, target)
 
         return ngram_to_watermark_lookup, frequencies_table
 
@@ -355,7 +369,8 @@ class WatermarkDetector(WatermarkBase):
         green_token_mask, green_token_mask_unique, offsets = [], [], []
         used_ngrams = {}
         unique_ngram_idx = 0
-        ngram_examples = ngrams(input_ids.cpu().tolist(), self.context_width + 1 - self.self_salt)
+        ngram_examples = ngrams(input_ids.cpu().tolist(),
+                                self.context_width + 1 - self.self_salt)
 
         for idx, ngram_example in enumerate(ngram_examples):
             green_token_mask.append(ngram_to_watermark_lookup[ngram_example])
@@ -365,9 +380,11 @@ class WatermarkDetector(WatermarkBase):
                 else:
                     used_ngrams[ngram_example] = True
                     unique_ngram_idx += 1
-                    green_token_mask_unique.append(ngram_to_watermark_lookup[ngram_example])
+                    green_token_mask_unique.append(
+                        ngram_to_watermark_lookup[ngram_example])
             else:
-                green_token_mask_unique.append(ngram_to_watermark_lookup[ngram_example])
+                green_token_mask_unique.append(
+                    ngram_to_watermark_lookup[ngram_example])
                 unique_ngram_idx += 1
             offsets.append(unique_ngram_idx - 1)
         return (
@@ -387,7 +404,8 @@ class WatermarkDetector(WatermarkBase):
         return_z_at_T: bool = True,
         return_p_value: bool = True,
     ):
-        ngram_to_watermark_lookup, frequencies_table = self._score_ngrams_in_passage(input_ids)
+        ngram_to_watermark_lookup, frequencies_table = self._score_ngrams_in_passage(
+            input_ids)
         green_token_mask, green_unique, offsets = self._get_green_at_T_booleans(
             input_ids, ngram_to_watermark_lookup
         )
@@ -403,7 +421,8 @@ class WatermarkDetector(WatermarkBase):
             green_token_count = sum(ngram_to_watermark_lookup.values())
         else:
             num_tokens_scored = sum(frequencies_table.values())
-            assert num_tokens_scored == len(input_ids) - self.context_width + self.self_salt
+            assert num_tokens_scored == len(
+                input_ids) - self.context_width + self.self_salt
             green_token_count = sum(
                 freq * outcome
                 for freq, outcome in zip(
@@ -419,23 +438,28 @@ class WatermarkDetector(WatermarkBase):
         if return_num_green_tokens:
             score_dict.update(dict(num_green_tokens=green_token_count))
         if return_green_fraction:
-            score_dict.update(dict(green_fraction=(green_token_count / num_tokens_scored)))
+            score_dict.update(dict(green_fraction=(
+                green_token_count / num_tokens_scored)))
         if return_z_score:
             score_dict.update(
-                dict(z_score=self._compute_z_score(green_token_count, num_tokens_scored))
+                dict(z_score=self._compute_z_score(
+                    green_token_count, num_tokens_scored))
             )
         if return_p_value:
             z_score = score_dict.get("z_score")
             if z_score is None:
-                z_score = self._compute_z_score(green_token_count, num_tokens_scored)
+                z_score = self._compute_z_score(
+                    green_token_count, num_tokens_scored)
             score_dict.update(dict(p_value=self._compute_p_value(z_score)))
         if return_green_token_mask:
             score_dict.update(dict(green_token_mask=green_token_mask.tolist()))
         if return_z_at_T:
             # Score z_at_T separately:
             sizes = torch.arange(1, len(green_unique) + 1)
-            seq_z_score_enum = torch.cumsum(green_unique, dim=0) - self.gamma * sizes
-            seq_z_score_denom = torch.sqrt(sizes * self.gamma * (1 - self.gamma))
+            seq_z_score_enum = torch.cumsum(
+                green_unique, dim=0) - self.gamma * sizes
+            seq_z_score_denom = torch.sqrt(
+                sizes * self.gamma * (1 - self.gamma))
             z_score_at_effective_T = seq_z_score_enum / seq_z_score_denom
             z_score_at_T = z_score_at_effective_T[offsets]
             assert torch.isclose(z_score_at_T[-1], torch.tensor(z_score))
@@ -458,7 +482,8 @@ class WatermarkDetector(WatermarkBase):
         #    ROC chart that calibrates to a chosen FPR. Due, to windowing, the multiple hypotheses will increase scores across the board#
         #    naive_count_correction=True is a partial remedy to this
 
-        ngram_to_watermark_lookup, frequencies_table = self._score_ngrams_in_passage(input_ids)
+        ngram_to_watermark_lookup, frequencies_table = self._score_ngrams_in_passage(
+            input_ids)
         green_mask, green_ids, offsets = self._get_green_at_T_booleans(
             input_ids, ngram_to_watermark_lookup
         )
@@ -481,11 +506,13 @@ class WatermarkDetector(WatermarkBase):
         for idx, size in enumerate(sizes):
             if size <= len_full_context:
                 # Compute hits within window for all positions in parallel:
-                window_score = torch.zeros(len_full_context - size + 1, dtype=torch.long)
+                window_score = torch.zeros(
+                    len_full_context - size + 1, dtype=torch.long)
                 # Include 0-th window
                 window_score[0] = partial_sum_id_table[size - 1]
                 # All other windows from the 1st:
-                window_score[1:] = partial_sum_id_table[size::s] - partial_sum_id_table[:-size:s]
+                window_score[1:] = partial_sum_id_table[size::s] - \
+                    partial_sum_id_table[:-size:s]
 
                 # Now compute batched z_scores
                 batched_z_score_enum = window_score - self.gamma * size
@@ -496,7 +523,8 @@ class WatermarkDetector(WatermarkBase):
                 maximal_z_score = batched_z_score.max()
                 z_score_max_per_window[idx] = maximal_z_score
 
-                z_score_at_effective_T = torch.cummax(batched_z_score, dim=0)[0]
+                z_score_at_effective_T = torch.cummax(
+                    batched_z_score, dim=0)[0]
                 cumulative_eff_z_score[size::s] = torch.maximum(
                     cumulative_eff_z_score[size::s], z_score_at_effective_T[:-1]
                 )
@@ -546,7 +574,8 @@ class WatermarkDetector(WatermarkBase):
             score_dict.update(dict(num_tokens_scored=optimal_window_size))
 
         denom = sqrt(optimal_window_size * self.gamma * (1 - self.gamma))
-        green_token_count = int(optimal_z * denom + self.gamma * optimal_window_size)
+        green_token_count = int(
+            optimal_z * denom + self.gamma * optimal_window_size)
         green_fraction = green_token_count / optimal_window_size
         if return_num_green_tokens:
             score_dict.update(dict(num_green_tokens=green_token_count))

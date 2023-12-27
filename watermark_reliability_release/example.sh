@@ -3,12 +3,12 @@
 # requires some OUTPUT_DIR to be set in the environment
 # as well as a path to the hf format LLAMA model
 
-RUN_NAME=opt1.3b_N500_T200
+RUN_NAME=examples
 
-OUTPUT_DIR=run_outputs
+OUTPUT_DIR=utils/examples_mod
 
 
-GENERATION_OUTPUT_DIR="$OUTPUT_DIR"/"$RUN_NAME"
+GENERATION_OUTPUT_DIR="$OUTPUT_DIR"
 
 # echo "Running generation pipeline with output dir: $GENERATION_OUTPUT_DIR"
 
@@ -37,10 +37,10 @@ GENERATION_OUTPUT_DIR="$OUTPUT_DIR"/"$RUN_NAME"
 
 python attack_pipeline.py \
     --attack_method=general \
-    --run_name="$RUN_NAME"_general_attack_s1 \
+    --run_name="$RUN_NAME"_attack \
     --wandb=False \
     --input_dir=$GENERATION_OUTPUT_DIR \
-    --output_dir="$GENERATION_OUTPUT_DIR"_attack_s1_winmax_attack \
+    --output_dir="$GENERATION_OUTPUT_DIR"/attack \
     --verbose=False \
     --length_align_strength 1.3 \
     --paraphrase_ngram_penalty 1 \
@@ -73,8 +73,8 @@ python attack_pipeline.py \
 
 python evaluation_pipeline.py \
     --evaluation_metrics=z-score,windowed-z-score,diversity,repetition,p-sp,ppl \
-    --run_name="$RUN_NAME"_eval1_fixed \
+    --run_name="$RUN_NAME"_attack \
     --wandb=False \
-    --input_dir="$GENERATION_OUTPUT_DIR"_attack_s1_winmax_attack \
+    --input_dir="$GENERATION_OUTPUT_DIR"/attack \
     --oracle_model_name_or_path facebook/opt-2.7b \
     # --roc_test_stat=all \

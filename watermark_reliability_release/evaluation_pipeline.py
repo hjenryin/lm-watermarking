@@ -14,26 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import NoneType
-
-from typing import Union
-import os
-import argparse
-from functools import partial
-from tqdm import tqdm
-
-import wandb
-import torch
-import numpy as np
-import sklearn.metrics as metrics
-
-from datasets import Dataset, Sequence
-from transformers import DataCollatorWithPadding
-
-from utils.submitit import str2bool  # better bool flag type for argparse
-from utils.io import read_jsonlines, read_json, write_json, write_jsonlines
-from utils.notebooks import filter_text_col_length, infer_length_column
-
+from datasets import disable_caching
 from utils.evaluation import (
     SUPPORTED_METRICS,
     NO_CHECK_ARGS,
@@ -41,7 +22,7 @@ from utils.evaluation import (
     FILTER_BY_COLUMNS,
     conditional_no_check_args,
     load_oracle_model,
-    evaluate_ppl,
+    evaluate_ppl,  #
     load_detector,
     compute_z_scores,
     compute_windowed_z_scores,
@@ -50,14 +31,29 @@ from utils.evaluation import (
     compute_p_sp,
     compute_coherence,
     compute_mauve,
-    compute_detect_retrieval,
+    compute_detect_retrieval,  # ?
     load_tokenizer,
     concat_rows,
 )
+from utils.notebooks import filter_text_col_length, infer_length_column
+from utils.io import read_jsonlines, read_json, write_json, write_jsonlines
+from utils.submitit import str2bool  # better bool flag type for argparse
+from transformers import DataCollatorWithPadding
+from datasets import Dataset, Sequence
+import sklearn.metrics as metrics
+import numpy as np
+import torch
+import wandb
+from tqdm import tqdm
+from functools import partial
+import argparse
+import os
+from typing import Union
+NoneType = type(None)
 
-print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
 
-from datasets import disable_caching
+# print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
+
 
 disable_caching()
 
@@ -96,7 +92,8 @@ def main(args):
     ###########################################################################
 
     # check that all metrics are supported
-    metric_support = [metric in SUPPORTED_METRICS for metric in args.evaluation_metrics]
+    metric_support = [
+        metric in SUPPORTED_METRICS for metric in args.evaluation_metrics]
     assert all(metric_support), (
         f"Unsupported metric '{args.evaluation_metrics[metric_support.index(False)]}' in"
         f" {args.evaluation_metrics}. Supported metrics are: {SUPPORTED_METRICS}"
@@ -203,17 +200,20 @@ def main(args):
     ###########################################################################
 
     if args.concat_rows != 0:
-        assert isinstance(args.concat_rows, int), f"Invalid concat_rows arg: {args.concat_rows}. "
+        assert isinstance(
+            args.concat_rows, int), f"Invalid concat_rows arg: {args.concat_rows}. "
 
         # set to all rows if -1
         if args.concat_rows == -1:
             args.concat_rows = len(gen_table_ds)
 
         if args.shuffle_before_concat:
-            print(f"Shuffling the gen table before concatenating every {args.concat_rows} rows...")
+            print(
+                f"Shuffling the gen table before concatenating every {args.concat_rows} rows...")
             gen_table_ds = gen_table_ds.shuffle()
 
-        print(f"Concatenating every {args.concat_rows} rows of the gen table...")
+        print(
+            f"Concatenating every {args.concat_rows} rows of the gen table...")
 
         # we concat all cols in OUTPUT_TEXT_COLUMN_NAMES
         # and update the length col to reflect the new length
@@ -227,7 +227,7 @@ def main(args):
         # manually write a btach loop bc hf doesnt support returning fewer rows than input
         concatenated_rows = []
         for i in tqdm(range(0, len(gen_table_ds), args.concat_rows)):
-            batch = gen_table_ds[i : i + args.concat_rows]
+            batch = gen_table_ds[i: i + args.concat_rows]
             concatenated_rows.append(concat_partial(batch))
         gen_table_concated_ds = Dataset.from_list(concatenated_rows)
 
@@ -309,7 +309,8 @@ def main(args):
             data_collator=data_collator,
         )
 
-        print(f"Computing metrics on model generations: {gen_table_concated_ds}")
+        print(
+            f"Computing metrics on model generations: {gen_table_concated_ds}")
 
         gen_table_w_ppl_ds = gen_table_concated_ds.map(
             evaluate_ppl_partial,
@@ -446,7 +447,8 @@ def main(args):
 
     if "detect-retrieval" in args.evaluation_metrics:
         print(f"Computing detect retrieval")
-        gen_table_w_detect_retrieval_ds = compute_detect_retrieval(gen_table_w_mauve_ds, args=args)
+        gen_table_w_detect_retrieval_ds = compute_detect_retrieval(
+            gen_table_w_mauve_ds, args=args)
     else:
         gen_table_w_detect_retrieval_ds = gen_table_w_mauve_ds
 
@@ -561,7 +563,8 @@ def main(args):
             # but also include the dataset index as a column
             series_column_names.remove("idx")
             table = wandb.Table(
-                dataframe=gen_table_w_metrics_ds.remove_columns(series_column_names).to_pandas()
+                dataframe=gen_table_w_metrics_ds.remove_columns(
+                    series_column_names).to_pandas()
             )
             run.log({"output_table": table})
 
@@ -578,7 +581,8 @@ def main(args):
         filtered_table = gen_table_w_metrics_ds.to_pandas()  # explictly convert lists
 
         for col in args.filter_by_columns:
-            length_col_name = infer_length_column(col, filtered_table, args=args)
+            length_col_name = infer_length_column(
+                col, filtered_table, args=args)
             filtered_table = filter_text_col_length(
                 filtered_table,
                 text_col_name=length_col_name,
@@ -591,10 +595,13 @@ def main(args):
         for metric_name in series_column_names:
             filtered_name = f"f_{target_T}p{upper_tolerance}m{lower_tolerance}_{metric_name}"
             try:
-                run.summary[f"{filtered_name}_mean"] = filtered_table[metric_name].mean()
-                run.summary[f"{filtered_name}_std"] = filtered_table[metric_name].std()
+                run.summary[f"{filtered_name}_mean"] = filtered_table[metric_name].mean(
+                )
+                run.summary[f"{filtered_name}_std"] = filtered_table[metric_name].std(
+                )
             except TypeError:
-                two_dim_mean = filtered_table[metric_name].apply(np.mean).mean()
+                two_dim_mean = filtered_table[metric_name].apply(
+                    np.mean).mean()
 
         ###########################################################################
         # Compute ROC-AUC and send to wandb
@@ -638,7 +645,8 @@ def main(args):
                                 )
                             }
                         )
-                        print(f"Successfully logged ROC-AUC metrics for {test_stat}.")
+                        print(
+                            f"Successfully logged ROC-AUC metrics for {test_stat}.")
 
                     except Exception as e:
                         if args.verbose:
@@ -670,7 +678,8 @@ def main(args):
             if "retrieval_score" in name and "prefix_length" in at_T_df.columns:
                 # compute the mean and std for each prefix length
                 # and log those pairs to wandb
-                df_view = at_T_df.groupby("prefix_length")[name].describe()[["mean", "std"]]
+                df_view = at_T_df.groupby("prefix_length")[
+                    name].describe()[["mean", "std"]]
                 T_indices = df_view.index
 
                 # for idx, (mean, std) in df_view.iterrows():
@@ -678,17 +687,20 @@ def main(args):
                 # log this triple as a table instead like the ROC curve above
                 # where the first two are plotted and the third is the x axis
                 data = [[x, y, z] for x, (y, z) in df_view.iterrows()]
-                table = wandb.Table(data=data, columns=["idx_T", "mean", "std"])
+                table = wandb.Table(data=data, columns=[
+                                    "idx_T", "mean", "std"])
                 # compute stderr from std
                 table.add_column(
                     "stderr",
                     [
-                        std / np.sqrt(len(at_T_df[at_T_df["prefix_length"] == idx]))
+                        std /
+                        np.sqrt(len(at_T_df[at_T_df["prefix_length"] == idx]))
                         for idx, std in zip(T_indices, df_view["std"])
                     ],
                 )
                 # first log mean
-                run.log({f"{name}": wandb.plot.line(table, "idx_T", "mean", title=f"{name} mean")})
+                run.log({f"{name}": wandb.plot.line(
+                    table, "idx_T", "mean", title=f"{name} mean")})
                 # then log std err
                 run.log(
                     {
@@ -716,7 +728,8 @@ def main(args):
                         neg = neg.to_numpy()[~np.isnan(neg.to_numpy())]
 
                         fpr, tpr, thresholds = metrics.roc_curve(
-                            np.concatenate([np.ones_like(pos), np.zeros_like(neg)]),  # labels
+                            np.concatenate(
+                                [np.ones_like(pos), np.zeros_like(neg)]),  # labels
                             np.concatenate([pos, neg]),  # scores
                             pos_label=1,
                         )
@@ -734,7 +747,8 @@ def main(args):
                     data = [
                         [x, y, z] for x, (y, z) in zip(T_indices, zip(all_aucs, all_tpr_at_X_fpr))
                     ]
-                    table = wandb.Table(data=data, columns=["idx_T", "aucs", "tpr_at"])
+                    table = wandb.Table(data=data, columns=[
+                                        "idx_T", "aucs", "tpr_at"])
                     run.log(
                         {
                             f"{name}_aucs": wandb.plot.line(
@@ -754,7 +768,8 @@ def main(args):
                 # this covers detectgpt_score_100_d and variants
                 # compute the mean and std for each prefix length
                 # and log those pairs to wandb
-                df_view = at_T_df.groupby("prefix_length")[name].describe()[["mean", "std"]]
+                df_view = at_T_df.groupby("prefix_length")[
+                    name].describe()[["mean", "std"]]
                 T_indices = df_view.index
 
                 # for idx, (mean, std) in df_view.iterrows():
@@ -762,18 +777,21 @@ def main(args):
                 # log this triple as a table instead like the ROC curve above
                 # where the first two are plotted and the third is the x axis
                 data = [[x, y, z] for x, (y, z) in df_view.iterrows()]
-                table = wandb.Table(data=data, columns=["idx_T", "mean", "std"])
+                table = wandb.Table(data=data, columns=[
+                                    "idx_T", "mean", "std"])
 
                 # compute stderr from std
                 table.add_column(
                     "stderr",
                     [
-                        std / np.sqrt(len(at_T_df[at_T_df["prefix_length"] == idx]))
+                        std /
+                        np.sqrt(len(at_T_df[at_T_df["prefix_length"] == idx]))
                         for idx, std in zip(T_indices, df_view["std"])
                     ],
                 )
                 # first log mean
-                run.log({f"{name}": wandb.plot.line(table, "idx_T", "mean", title=f"{name} mean")})
+                run.log({f"{name}": wandb.plot.line(
+                    table, "idx_T", "mean", title=f"{name} mean")})
                 # then log std err
                 run.log(
                     {
@@ -793,7 +811,8 @@ def main(args):
                         baseline_col = "baseline_completion_detectgpt_score_100_d"
                     elif name.endswith("_100_z"):
                         baseline_col = "baseline_completion_detectgpt_score_100_z"
-                    pos_negs_at_T = at_T_df.groupby("prefix_length")[[name, baseline_col]]
+                    pos_negs_at_T = at_T_df.groupby("prefix_length")[
+                        [name, baseline_col]]
                     # auc_at_T = []
                     # tpr_at_X_fpr = []
                     all_aucs, all_tpr_at_X_fpr = [], []
@@ -805,7 +824,8 @@ def main(args):
                         neg = neg.to_numpy()[~np.isnan(neg.to_numpy())]
 
                         fpr, tpr, thresholds = metrics.roc_curve(
-                            np.concatenate([np.ones_like(pos), np.zeros_like(neg)]),  # labels
+                            np.concatenate(
+                                [np.ones_like(pos), np.zeros_like(neg)]),  # labels
                             np.concatenate([pos, neg]),  # scores
                             pos_label=1,
                         )
@@ -823,7 +843,8 @@ def main(args):
                     data = [
                         [x, y, z] for x, (y, z) in zip(T_indices, zip(all_aucs, all_tpr_at_X_fpr))
                     ]
-                    table = wandb.Table(data=data, columns=["idx_T", "aucs", "tpr_at"])
+                    table = wandb.Table(data=data, columns=[
+                                        "idx_T", "aucs", "tpr_at"])
                     run.log(
                         {
                             f"{name}_aucs": wandb.plot.line(
@@ -846,7 +867,8 @@ def main(args):
         # Merge z_at_T and other sequence metrics so they can be shown in wandb:
         for name, feat in gen_table_w_metrics_ds.features.items():
             if isinstance(feat, Sequence):
-                max_feat_seq_len = max([len(l) for l in gen_table_w_metrics_ds[name]])
+                max_feat_seq_len = max([len(l)
+                                       for l in gen_table_w_metrics_ds[name]])
                 merging_seq = np.zeros(max_feat_seq_len)
                 counts = np.zeros(max_feat_seq_len)
                 proto_variance = np.zeros(max_feat_seq_len)
@@ -879,13 +901,16 @@ def main(args):
                 data = [
                     [x, y, z]
                     for (x, y, z) in zip(
-                        averaged_seq[mask], seq_stderr[mask], range(len(averaged_seq[mask]))
+                        averaged_seq[mask], seq_stderr[mask], range(
+                            len(averaged_seq[mask]))
                     )
                 ]
-                table = wandb.Table(data=data, columns=["avg", "stderr", "idx_T"])
+                table = wandb.Table(data=data, columns=[
+                                    "avg", "stderr", "idx_T"])
 
                 # first plot avg
-                run.log({f"{name}": wandb.plot.line(table, "idx_T", "avg", title=f"{name} avg")})
+                run.log({f"{name}": wandb.plot.line(
+                    table, "idx_T", "avg", title=f"{name} avg")})
                 # then plot stderr
                 run.log(
                     {
@@ -917,17 +942,21 @@ def main(args):
                     all_aucs, all_tpr_at_X_fpr = [], []
                     for T in range(1, max_length):
                         w_wm_stats = np.array(
-                            [t[T] for t in gen_table_w_metrics_ds[w_wm_col] if len(t) > T]
+                            [t[T]
+                                for t in gen_table_w_metrics_ds[w_wm_col] if len(t) > T]
                         )
 
                         baseline_stats = np.array(
-                            [t[T] for t in gen_table_w_metrics_ds[base_col] if len(t) > T]
+                            [t[T]
+                                for t in gen_table_w_metrics_ds[base_col] if len(t) > T]
                         )[: len(w_wm_stats)]
-                        all_scores = np.concatenate([baseline_stats, w_wm_stats])
+                        all_scores = np.concatenate(
+                            [baseline_stats, w_wm_stats])
 
                         baseline_labels = np.zeros_like(baseline_stats)
                         attacked_labels = np.ones_like(w_wm_stats)
-                        all_labels = np.concatenate([baseline_labels, attacked_labels])
+                        all_labels = np.concatenate(
+                            [baseline_labels, attacked_labels])
 
                         if len(np.unique(all_labels)) < 2:
                             roc_auc = float("NaN")
@@ -951,7 +980,8 @@ def main(args):
                         [x, y, z]
                         for (x, y, z) in zip(all_aucs, all_tpr_at_X_fpr, range(len(all_aucs)))
                     ]
-                    table = wandb.Table(data=data, columns=["aucs", "tpr_at", "idx_T"])
+                    table = wandb.Table(data=data, columns=[
+                                        "aucs", "tpr_at", "idx_T"])
                     run.log(
                         {
                             f"{name}_aucs": wandb.plot.line(
@@ -997,7 +1027,8 @@ def _roc_metrics_for_wandb(
     # drop nans in either column
     if remove_nan:
         orig_length = len(gen_table_ds)
-        gen_table_ds = gen_table_ds.dropna(subset=[baseline_col_name, w_wm_col_name])
+        gen_table_ds = gen_table_ds.dropna(
+            subset=[baseline_col_name, w_wm_col_name])
         if orig_length != len(gen_table_ds):
             print(
                 f"NOTE: During ROC calculation, dropped {orig_length - len(gen_table_ds)} rows due to NaNs in {baseline_col_name} or {w_wm_col_name}"
@@ -1011,7 +1042,8 @@ def _roc_metrics_for_wandb(
     attacked_labels = np.ones_like(w_wm_stats)
     all_labels = np.concatenate([baseline_labels, attacked_labels])
 
-    fpr, tpr, thresholds = metrics.roc_curve(all_labels, all_scores, pos_label=1)
+    fpr, tpr, thresholds = metrics.roc_curve(
+        all_labels, all_scores, pos_label=1)
     roc_auc = metrics.auc(fpr, tpr)
     try:
         tpr_at_X_fpr = tpr[np.where(fpr < 1e-3)[0][-1]]
@@ -1021,7 +1053,8 @@ def _roc_metrics_for_wandb(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run evaluation pipeline for watermark detection")
+    parser = argparse.ArgumentParser(
+        description="Run evaluation pipeline for watermark detection")
     parser.add_argument(
         "--evaluation_metrics",
         type=str,

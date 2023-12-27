@@ -15,10 +15,23 @@
 # limitations under the License.
 
 import torch
+from functools import partial
 
 # HF classes
 
 from datasets import load_dataset, IterableDataset
+from transformers import LogitsProcessorList
+if __name__ == "__main__":
+    import sys
+    sys.path.append("../")
+    from data.lfqa import load_lfqa
+    from data.essays import load_essays
+    from data.wikitext import load_wikitext
+else:
+    from .data.lfqa import load_lfqa
+    from .data.essays import load_essays
+    from .data.wikitext import load_wikitext
+from watermark_processor import WatermarkLogitsProcessor
 
 from torch import Tensor
 from tokenizers import Tokenizer
@@ -31,33 +44,38 @@ from transformers import (
     DataCollatorWithPadding,
 )
 
-from .data.lfqa import load_lfqa
-from .data.essays import load_essays
-from .data.wikitext import load_wikitext
+
+from utils.io import dump_json_check_path
 
 MAX_GENERATIONS = int(10000)  # Hardcoded max length to avoid infinite loop
 
 
-def load_model(args):
+def load_model(args, attack_model=False):
     """Load and return the model and tokenizer"""
+    if not attack_model:
+        model_name_or_path = args.model_name_or_path
+    else:
+        model_name_or_path = args.attack_model_name
 
     args.is_seq2seq_model = any(
-        [(model_type in args.model_name_or_path) for model_type in ["t5", "T0"]]
+        [(model_type in model_name_or_path.lower())
+         for model_type in ["t5", "t0"]]
     )
     args.is_decoder_only_model = any(
-        [(model_type in args.model_name_or_path) for model_type in ["gpt", "opt", "bloom", "llama"]]
+        [(model_type in model_name_or_path.lower())
+         for model_type in ["gpt", "opt", "bloom", "llama"]]
     )
     if args.is_seq2seq_model:
-        model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name_or_path)
     elif args.is_decoder_only_model:
         if args.load_fp16:
             model = AutoModelForCausalLM.from_pretrained(
-                args.model_name_or_path, torch_dtype=torch.float16, device_map="auto"
+                model_name_or_path, torch_dtype=torch.float16, device_map="auto"
             )
         else:
-            model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
     else:
-        raise ValueError(f"Unknown model type: {args.model_name_or_path}")
+        raise ValueError(f"Unknown model type: {model_name_or_path}")
 
     if args.use_gpu:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -72,24 +90,26 @@ def load_model(args):
     if args.is_decoder_only_model:
         padding_side = "left"
     else:
-        raise NotImplementedError(
-            "Need to check how to handle padding for seq2seq models when calling generate"
-        )
-
-    if "llama" in args.model_name_or_path:
+        padding_side = None
+    if "llama" in model_name_or_path:
         tokenizer = LlamaTokenizer.from_pretrained(
-            args.model_name_or_path, padding_side=padding_side
+            model_name_or_path, padding_side=padding_side
         )
         model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
         model.config.bos_token_id = 1
         model.config.eos_token_id = 2
     else:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model_name_or_path, padding_side=padding_side
-        )
-
-    args.model_max_length = model.config.max_position_embeddings
-
+        if padding_side:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name_or_path, padding_side=padding_side
+            )
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    if hasattr(model.config, "max_position_embeddings"):
+        args.model_max_length = model.config.max_position_embeddings
+    else:
+        args.model_max_length = 1024
+    model.to(device)
     return model, tokenizer, device
 
 
@@ -172,7 +192,8 @@ def load_hf_dataset(args):
                     "ref_output_col_name": None,
                 }
             )
-            args.columns_to_remove = list(set(args.columns_to_remove + ["text", "meta"]))
+            args.columns_to_remove = list(
+                set(args.columns_to_remove + ["text", "meta"]))
         else:
             raise NotImplementedError(
                 f"Dataset {dataset_name} not yet supported. Please add specs to load_hf_dataset function."
@@ -185,7 +206,8 @@ def load_hf_dataset(args):
     # and take/select only the first n rows of the dataset (which caps the total number of pipeline iters possible)
     if isinstance(indexed_dataset, IterableDataset):
         shuffled_dataset = (
-            indexed_dataset.shuffle(seed=args.shuffle_seed, buffer_size=args.shuffle_buffer_size)
+            indexed_dataset.shuffle(
+                seed=args.shuffle_seed, buffer_size=args.shuffle_buffer_size)
             if args.shuffle_dataset
             else indexed_dataset
         )
@@ -274,7 +296,8 @@ def tokenize_and_truncate(
     assert hf_model_name is not None, "need model name to know whether to adjust wrt special tokens"
     assert input_col_name in example, f"expects {input_col_name} field to be present"
     # tokenize
-    inputs_ids = tokenizer(example[input_col_name], return_tensors="pt")["input_ids"]
+    inputs_ids = tokenizer(example[input_col_name], return_tensors="pt")[
+        "input_ids"]
     example.update({"untruncated_inputs": inputs_ids})
 
     if truncate_left:
@@ -353,7 +376,8 @@ def tokenize_only(
         if tokd_input_len + tokd_ref_output_length > model_max_length:
             # truncate the ref output
             original_ref_output_len = tokd_ref_output_length
-            ref_output_ids = ref_output_ids[:, : model_max_length - tokd_input_len]
+            ref_output_ids = ref_output_ids[:,
+                                            : model_max_length - tokd_input_len]
             if original_ref_output_len != ref_output_ids.shape[1]:
                 print(
                     "Right truncating output, input+ref output too long for model. "
@@ -417,9 +441,10 @@ def tokenize_for_generation(
         untruncated_inputs = example.pop("untruncated_inputs")
         full_sample_len = untruncated_inputs.shape[1]
         # decode the preprocessed input to store for audit
-        re_decoded_input = tokenizer.batch_decode(inputs, skip_special_tokens=True)[0]
+        re_decoded_input = tokenizer.batch_decode(
+            inputs, skip_special_tokens=True)[0]
         # also decode the original suffix of the input for audit as the baseline
-        baseline_completion_tokens = untruncated_inputs[:, inputs.shape[-1] :]
+        baseline_completion_tokens = untruncated_inputs[:, inputs.shape[-1]:]
         decoded_baseline_completion = tokenizer.batch_decode(
             baseline_completion_tokens, skip_special_tokens=True
         )[0]
@@ -457,12 +482,18 @@ def generate(
     device=None,
     args=None,
 ):
-    input_ids = collate_batch(input_ids=examples["input_ids"], collator=data_collator).to(device)
+    # exit()
+    if data_collator is not None:
+        input_ids = collate_batch(
+            input_ids=examples["input_ids"], collator=data_collator).to(device)
+    else:
+        input_ids = examples["input_ids"].to(device)
 
     with torch.no_grad():
         if args.generation_seed is not None:
             torch.manual_seed(args.generation_seed)
-        output_without_watermark = generate_without_watermark(input_ids=input_ids)
+        output_without_watermark = generate_without_watermark(
+            input_ids=input_ids)
 
         if args.generation_seed is not None:
             torch.manual_seed(args.generation_seed)
@@ -470,8 +501,9 @@ def generate(
 
     if args.is_decoder_only_model:
         # need to isolate the newly generated tokens
-        output_without_watermark = output_without_watermark[:, input_ids.shape[-1] :]
-        output_with_watermark = output_with_watermark[:, input_ids.shape[-1] :]
+        output_without_watermark = output_without_watermark[:,
+                                                            input_ids.shape[-1]:]
+        output_with_watermark = output_with_watermark[:, input_ids.shape[-1]:]
 
     decoded_output_without_watermark = tokenizer.batch_decode(
         output_without_watermark, skip_special_tokens=True
@@ -500,3 +532,206 @@ def generate(
         ]
 
     return examples
+
+
+def get_generate_watermark(tokenizer, model, args):
+    ###########################################################################
+    # Construct the watermark processor
+    ###########################################################################
+
+    watermark_processor = WatermarkLogitsProcessor(
+        vocab=list(tokenizer.get_vocab().values()),
+        gamma=args.gamma,
+        delta=args.delta,
+        seeding_scheme=args.seeding_scheme,
+        store_spike_ents=args.store_spike_ents,
+        select_green_tokens=True,
+    )
+
+    ###########################################################################
+    # Configure the generation partials
+    ###########################################################################
+
+    gen_kwargs = dict(max_new_tokens=args.max_new_tokens)
+    # gen_kwargs.update(dict(exponential_decay_length_penalty=(100,1.01)))
+        
+
+    # FIXME can add typica
+    if args.use_sampling:
+        gen_kwargs.update(
+            dict(
+                do_sample=True,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                typical_p=args.typical_p,
+                temperature=args.sampling_temp,
+                repetition_penalty=args.repetition_penalty,
+            )
+        )
+    else:
+        gen_kwargs.update(dict(num_beams=args.num_beams,
+                               repetition_penalty=args.repetition_penalty,))
+
+    generate_without_watermark = partial(model.generate, **gen_kwargs)
+    generate_with_watermark = partial(model.generate, logits_processor=LogitsProcessorList([
+                                      watermark_processor]), **gen_kwargs)
+    return generate_without_watermark, generate_with_watermark, watermark_processor
+
+
+if __name__ == "__main__":
+    print("Custom Input")
+    import argparse
+    from utils.submitit import str2bool
+
+    def parse_args():
+        parser = argparse.ArgumentParser(
+            description="Run watermarked huggingface LM generation ")
+        parser.add_argument(
+            "--model_name_or_path",
+            type=str,
+            default="facebook/opt-2.7b",
+            # default="google/flan-t5-large",
+            help="Main model, path to pretrained model or model identifier from huggingface.co/models.",
+        )
+        parser.add_argument(
+            "--load_fp16",
+            type=str2bool,
+            default=True,
+            help="Whether to run model in float16 precsion.",
+        )
+        parser.add_argument(
+            "--use_gpu",
+            type=str2bool,
+            default=True,
+            help="Whether to run inference and watermark hashing/seeding/permutation on gpu.",
+        )
+        parser.add_argument(
+            "--use_sampling",
+            type=str2bool,
+            default=False,
+            help=("Whether to perform sampling during generation. (non-greedy decoding)"),
+        )
+        parser.add_argument(
+            "--sampling_temp",
+            type=float,
+            default=0.7,
+            help="The temperature to use when generating using multinom sampling",
+        )
+        parser.add_argument(
+            "--top_k",
+            type=int,
+            default=0,
+            help="The top k to use when generating using top_k version of multinom sampling",
+        )
+        parser.add_argument(
+            "--top_p",
+            type=float,
+            default=1.0,
+            help="The top p to use when generating using top_p version of sampling",
+        )
+        parser.add_argument(
+            "--typical_p",
+            type=float,
+            default=1.0,
+            help="The typical p to use when generating using typical decoding version of multinom sampling",
+        )
+        parser.add_argument(
+            "--num_beams",
+            type=int,
+            default=1,
+            help="The number of beams to use where '1' is no beam search.",
+        )
+        parser.add_argument(
+            "--repetition_penalty",
+            type=float,
+            default=1.0,
+            help="The repetition penalty for transformer generation.",
+        )
+        parser.add_argument(
+            "--generation_seed",
+            type=int,
+            default=None,
+            help="Seed for setting the torch rng prior to generation using any decoding scheme with randomness.",
+        )
+        parser.add_argument(
+            "--generation_batch_size",
+            type=int,
+            default=4,
+            help="The batch size to use for generation.",
+        )
+        parser.add_argument(
+            "--seeding_scheme",
+            type=str,
+            default="simple_1",
+            help="The seeding procedure to use for the watermark.",
+        )
+        parser.add_argument(
+            "--gamma",
+            type=float,
+            default=0.25,
+            help="The ratio of tokens to put in the greenlist when splitting the vocabulary",
+        )
+        parser.add_argument(
+            "--delta",
+            type=float,
+            default=2.0,
+            help="The amount of bias (absolute) to add to the logits in the whitelist half of the vocabulary at every step",
+        )
+        parser.add_argument(
+            "--store_spike_ents",
+            type=str2bool,
+            default=True,
+            help=(
+                "Whether to store the spike entropies while generating with watermark processor. "),
+        )
+        parser.add_argument(
+            "--verbose",
+            type=str2bool,
+            default=False,
+            help="Whether to log the generations to stdout.",
+        )
+        parser.add_argument(
+            "--run_name",
+            type=str,
+            default=None,
+            help="The unique name for the run.",
+        )
+        parser.add_argument(
+            "--output_dir",
+            type=str,
+            default="./output",
+            help="The unique name for the run.",
+        )
+        parser.add_argument(
+            "--overwrite",
+            type=str2bool,
+            default=False,
+            help="Allow overwriting of old generation files at the same output location.",
+        )
+        parser.add_argument(
+            "--max_new_tokens",
+            type=int,
+            default=200,
+            help="The number of tokens to generate using the model, and the num tokens removed from real text sample",
+        )
+        args = parser.parse_args()
+        return args
+    args = parse_args()
+
+    prompt = ["If it feels like the future of AI is a rapidly changing landscape, that’s because the present innovations in the field of artificial intelligence are accelerating at such a blazing-fast pace that it’s tough to keep up.",
+              "Ask me why I love dogs so much and you’ll get a two-word answer – unconditional love. And then, those two words will most likely be followed by a long rant about dogs. I’ve loved dogs long before I had one of my own.",
+              "A market order is an instruction by an investor to a broker to buy or sell stock shares, bonds, or other assets at the best available price in the current financial market. It is meant to be executed as quickly as possible at the current asking price.",]
+    # prompt=["Give a comprehensive description of the history of AI. ", "What is the most important breakthrough in natural language processing? Explain in detail.", "Tell me a story about a dog and a girl who loves it. "]
+    model, tokenizer, device = load_model(args)
+    input_ids = tokenizer(prompt, return_tensors="pt", padding=True)[
+        "input_ids"].to(device)
+    examples = {"input_ids": input_ids, "prompt": prompt}
+    print(input_ids)
+    generate_without_watermark, generate_with_watermark, watermark_processor = get_generate_watermark(tokenizer, model,
+                                                                                                      args)
+    examples = generate(examples, None, generate_with_watermark,
+                        generate_without_watermark, watermark_processor, tokenizer, device, args)
+    # change dict of lists into list of dicts
+    examples.pop("input_ids")
+    examples = [dict(zip(examples, t)) for t in zip(*examples.values())]
+    dump_json_check_path(examples, args)

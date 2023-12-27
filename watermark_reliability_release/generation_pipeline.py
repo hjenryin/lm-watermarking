@@ -19,8 +19,13 @@ import argparse
 from functools import partial
 from tqdm import tqdm
 import wandb
+import torch
+from torch import fx
 
-print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
+# help(torch.fx.wrap)
+# exit()
+
+# print(f"Current huggingface cache dir: {os.environ['HF_HOME']}")
 
 # HF classses
 from transformers import LogitsProcessorList, DataCollatorWithPadding
@@ -29,7 +34,7 @@ from transformers import LogitsProcessorList, DataCollatorWithPadding
 from utils.submitit import str2bool
 
 # some file i/o helpers
-from utils.io import write_jsonlines, write_json
+from utils.io import write_jsonlines, write_json, dump_json_check_path
 
 # watermarking functionality
 from watermark_processor import WatermarkLogitsProcessor
@@ -43,6 +48,7 @@ from utils.generation import (
     check_output_lengths,
     tokenize_for_generation,
     generate,
+    get_generate_watermark
 )
 
 
@@ -109,9 +115,7 @@ def main(args):
         # truncate_input_for_prompt is a bool flag, that is set by
         # the dataset loading function, semi-redundant, to make sure
         # people are very aware of which input data style they are using
-        assert (
-            args.truncate_input_for_prompt == False
-        ), "Cannot truncate input for prompt if 'no_truncation' strategy is specified"
+        assert args.truncate_input_for_prompt == False, "Cannot truncate input for prompt if 'no_truncation' strategy is specified"
         pass
     else:
         ValueError(f"Unknown input truncation strategy {args.input_truncation_strategy}")
@@ -131,9 +135,8 @@ def main(args):
     elif args.input_filtering_strategy == "completion_length":
         input_check_kwargs.update(dict(min_prompt_len=0, min_completion_len=args.max_new_tokens))
     elif args.input_filtering_strategy == "prompt_and_completion_length":
-        input_check_kwargs.update(
-            dict(min_prompt_len=args.min_prompt_tokens, min_completion_len=args.max_new_tokens)
-        )
+        input_check_kwargs.update(dict(
+            min_prompt_len=args.min_prompt_tokens, min_completion_len=args.max_new_tokens))
     elif args.input_filtering_strategy == "no_filter":
         input_check_kwargs.update(dict(min_prompt_len=0, min_completion_len=0))
     else:
@@ -148,43 +151,8 @@ def main(args):
         ValueError(f"Unknown output filtering strategy {args.output_filtering_strategy}")
     output_check = partial(check_output_lengths, **output_kwargs)
 
-    ###########################################################################
-    # Construct the watermark processor
-    ###########################################################################
-
-    watermark_processor = WatermarkLogitsProcessor(
-        vocab=list(tokenizer.get_vocab().values()),
-        gamma=args.gamma,
-        delta=args.delta,
-        seeding_scheme=args.seeding_scheme,
-        store_spike_ents=args.store_spike_ents,
-        select_green_tokens=True,
-    )
-
-    ###########################################################################
-    # Configure the generation partials
-    ###########################################################################
-
-    gen_kwargs = dict(max_new_tokens=args.max_new_tokens)
-
-    # FIXME can add typica
-    if args.use_sampling:
-        gen_kwargs.update(
-            dict(
-                do_sample=True,
-                top_k=args.top_k,
-                top_p=args.top_p,
-                typical_p=args.typical_p,
-                temperature=args.sampling_temp,
-            )
-        )
-    else:
-        gen_kwargs.update(dict(num_beams=args.num_beams))
-
-    generate_without_watermark = partial(model.generate, **gen_kwargs)
-    generate_with_watermark = partial(
-        model.generate, logits_processor=LogitsProcessorList([watermark_processor]), **gen_kwargs
-    )
+    generate_without_watermark, generate_with_watermark, watermark_processor = get_generate_watermark(tokenizer, model,
+                                                                                                      args)
 
     # construct the collator
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding=True, pad_to_multiple_of=8)
@@ -300,30 +268,7 @@ def main(args):
     # Generation jsonl dumping
     ###########################################################################
 
-    gen_table_meta_path = f"{args.output_dir}/gen_table_meta.json"
-    gen_table_path = f"{args.output_dir}/gen_table.jsonl"
-    safe_gen_table_path = f"{args.output_dir}/gen_table_safe.jsonl"
-
-    args.gen_table_already_existed = False
-
-    if os.path.exists(gen_table_path):
-        args.gen_table_already_existed = True
-        print(f"Found existing generation files at this output dir: {args.output_dir}")
-        if args.overwrite:
-            print("Overwriting old generation files.")
-            gen_table_path = gen_table_path
-        else:
-            print(
-                f"Writing generations at alternate, safe path and exiting. Note! this only works once. "
-                f"Safe version will get overwritten next time ... "
-            )
-            gen_table_path = safe_gen_table_path
-
-    gen_table_meta = args.__dict__
-    gen_table = processed_examples
-
-    write_jsonlines(gen_table, gen_table_path)
-    write_json(gen_table_meta, gen_table_meta_path, indent=4)
+    dump_json_check_path(processed_examples, args)
 
     # finish the wandb run
     if args.wandb:
@@ -333,8 +278,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run watermarked huggingface LM generation pipeline"
-    )
+        description="Run watermarked huggingface LM generation pipeline")
     parser.add_argument(
         "--model_name_or_path",
         type=str,
@@ -498,6 +442,12 @@ if __name__ == "__main__":
         help="The number of beams to use where '1' is no beam search.",
     )
     parser.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=1.0,
+        help="The repetition penalty for transformer generation.",
+    )
+    parser.add_argument(
         "--generation_seed",
         type=int,
         default=None,
@@ -598,8 +548,7 @@ if __name__ == "__main__":
     if args.min_generations <= 0:
         args.min_generations = MAX_GENERATIONS
         print(
-            f"Warning: min_generations is -1. A hardcoded value of {MAX_GENERATIONS} will be used to limit the generation loop."
-        )
+            f"Warning: min_generations is -1. A hardcoded value of {MAX_GENERATIONS} will be used to limit the generation loop.")
 
     if args.limit_indices is None:
         print("No limit_indices specified, pulling all examples from the dataset.")

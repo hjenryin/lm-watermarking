@@ -137,3 +137,33 @@ def write_json(obj: Mapping[str, Any], filename: str, indent: int = None):
 
 def print_json(d, indent=4):
     print(json.dumps(d, indent=indent))
+
+
+def dump_json_check_path(data, args):
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+    gen_table_meta_path = f"{args.output_dir}/gen_table_meta.json"
+    gen_table_path = f"{args.output_dir}/gen_table.jsonl"
+    safe_gen_table_path = f"{args.output_dir}/gen_table_safe.jsonl"
+
+    args.gen_table_already_existed = False
+
+    if os.path.exists(gen_table_path):
+        args.gen_table_already_existed = True
+        print(
+            f"Found existing generation files at this output dir: {args.output_dir}")
+        if args.overwrite:
+            print("Overwriting old generation files.")
+            gen_table_path = gen_table_path
+        else:
+            print(
+                f"Writing generations at alternate, safe path and exiting. Note! this only works once. "
+                f"Safe version will get overwritten next time ... "
+            )
+            gen_table_path = safe_gen_table_path
+
+    gen_table_meta = args.__dict__
+    gen_table = data
+
+    write_jsonlines(gen_table, gen_table_path)
+    write_json(gen_table_meta, gen_table_meta_path, indent=4)
