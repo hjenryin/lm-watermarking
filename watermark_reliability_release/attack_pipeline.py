@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import torch.fx
 import os
 import argparse
 from functools import partial
@@ -41,6 +41,8 @@ from utils.attack import (
 
 
 def main(args):
+    from torch.multiprocessing import set_start_method
+    set_start_method("spawn")
     ###########################################################################
     # Create output dir if it doesn't exist, and warn if it contains an
     # attacked generations file
@@ -88,6 +90,14 @@ def main(args):
         f"failed for safety bc there is a secondary 'safe' marked file",
         f" in this dir indicating a possible issue with the generation step. ",
     )
+    
+    if args.full_length_possible:
+        yielding=True
+        cache_path=args.input_dir+"/gen_table_expanded.jsonl"
+        if  os.path.exists(cache_path):
+            args.full_length_possible=False
+            print("Full length generations already exist. Skip generation.")
+            gen_table_path=cache_path
 
     cmdline_args = args.__dict__.copy()
     prev_gen_table_meta = read_json(gen_table_meta_path)
@@ -145,7 +155,7 @@ def main(args):
 
         openai.api_base = "https://api.chatanywhere.com.cn/v1"
         openai.api_key = os.environ["OPENAI_API_KEY"]
-        prompt_pool = read_json("utils/prompts.json")["prompt_pool"]
+        prompt_pool = read_json("utils/prompts.json")["attack_prompt"]
         prompt_pool = {int(k): v for k, v in prompt_pool.items()}
 
         if args.attack_prompt is None:
@@ -168,7 +178,7 @@ def main(args):
 
     elif args.attack_method == "general":
         print("Running general attack")
-        prompt_pool = read_json("utils/prompts.json")["prompt_pool"]
+        prompt_pool = read_json("utils/prompts.json")["attack_prompt"]
         prompt_pool = {int(k): v for k, v in prompt_pool.items()}
 
         if args.attack_prompt is None:
@@ -177,7 +187,7 @@ def main(args):
 
         print(f"Using attack prompt: {attack_prompt}")
 
-        gen_table_attacked_ds = general_paraphrase_attack(gen_table_ds, attack_prompt, args=args)
+        gen_table_attacked_ds = general_paraphrase_attack(gen_table_ds, attack_prompt, args=args,yielding=yielding)
 
     ###########################################################################
     # DIPPER attack
@@ -503,6 +513,12 @@ if __name__ == "__main__":
         type=float,
         default=1.0,
         help="The length penalty for generation()",
+    )
+    parser.add_argument(
+        "--full_length_possible",
+        default=False,
+        action="store_true",
+        help="Whether to allow full length generations",
     )
     args = parser.parse_args()
 

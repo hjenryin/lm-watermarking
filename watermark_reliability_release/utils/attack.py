@@ -19,7 +19,8 @@ import time
 import openai
 
 from utils.dipper_attack_pipeline import generate_dipper_paraphrases
-from utils.general_paraphrase_attack import generate_paraphrase_paraphrase
+from utils.general_paraphrase_attack import generate_paraphrase
+from utils.io import write_jsonlines
 
 from utils.evaluation import OUTPUT_TEXT_COLUMN_NAMES
 from utils.copy_paste_attack import single_insertion, triple_insertion_single_len, k_insertion_t_len
@@ -177,7 +178,28 @@ def copy_paste_attack(example, tokenizer=None, args=None):
     return example
 
 
-def general_paraphrase_attack(data, attack_prompt=None, args=None):
+def general_paraphrase_attack(data, attack_prompt=None, args=None,yielding=False):
     assert attack_prompt, "Prompt must be provided for general paraphrase attack"
-    ds = generate_paraphrase_paraphrase(data, attack_prompt=attack_prompt, args=args)
-    return ds
+    if not yielding:
+        if "llama" not in args.attack_model_name.lower():
+            ds = generate_paraphrase(data, attack_prompt=attack_prompt, args=args)
+        else:
+            from utils.llama_paraphrase_attack import llama_paraphrase
+            ds= llama_paraphrase(data, attack_prompt=attack_prompt, args=args)
+            
+        return ds
+    else:
+        assert "llama" in args.attack_model_name.lower()
+        from utils.llama_paraphrase_attack_full_length_yield import llama_paraphrase
+        ds= llama_paraphrase(data, attack_prompt=attack_prompt, args=args)
+        results=[]
+        while True:
+            try:
+                dd=next(ds)
+                results.append(dd)
+                write_jsonlines([dd],args.output_dir+"/llama_yield_temp.jsonl",open_mode="a",verbose=False)
+            except StopIteration:
+                break
+        from datasets import Dataset
+        results = Dataset.from_list(results)
+        return results

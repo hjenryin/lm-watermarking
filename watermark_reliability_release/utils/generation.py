@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
+import torch,os
 from functools import partial
 
 # HF classes
@@ -42,6 +42,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
     DataCollatorWithPadding,
+    LlamaForCausalLM,
 )
 
 
@@ -50,12 +51,14 @@ from utils.io import dump_json_check_path
 MAX_GENERATIONS = int(10000)  # Hardcoded max length to avoid infinite loop
 
 
-def load_model(args, attack_model=False):
+def load_model(args, attack_model=False,device=None):
     """Load and return the model and tokenizer"""
     if not attack_model:
         model_name_or_path = args.model_name_or_path
     else:
         model_name_or_path = args.attack_model_name
+    
+    cache_path_4b = "model_cache_4b/"+model_name_or_path
 
     args.is_seq2seq_model = any(
         [(model_type in model_name_or_path.lower())
@@ -63,28 +66,50 @@ def load_model(args, attack_model=False):
     )
     args.is_decoder_only_model = any(
         [(model_type in model_name_or_path.lower())
-         for model_type in ["gpt", "opt", "bloom", "llama"]]
+         for model_type in ["gpt", "opt", "bloom", "llama","mistral","dolly"]]
     )
     if args.is_seq2seq_model:
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name_or_path)
-    elif args.is_decoder_only_model:
-        if args.load_fp16:
+    elif args.is_decoder_only_model and not "llama" in model_name_or_path.lower():
+        
+        if "7b" in model_name_or_path.lower():
+            if not os.path.exists(cache_path_4b):
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name_or_path, load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,device_map=device if device else "auto"
+                )
+                os.makedirs(os.path.dirname(cache_path_4b),exist_ok=True)
+                # model.save_pretrained(cache_path_4b)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(
+                    cache_path_4b, load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16, device_map=device if device else "auto")
+        elif args.load_fp16:
             model = AutoModelForCausalLM.from_pretrained(
                 model_name_or_path, torch_dtype=torch.float16, device_map="auto"
             )
         else:
             model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+    elif "llama" in model_name_or_path.lower():
+        if not os.path.exists(cache_path_4b):
+            model = LlamaForCausalLM.from_pretrained(
+                model_name_or_path, load_in_4bit=True,bnb_4bit_compute_dtype=torch.float16,device_map=device if device else "auto"
+            )
+            os.makedirs(os.path.dirname(cache_path_4b),exist_ok=True)
+            # model.save_pretrained(cache_path_4b)
+        else:
+            model = LlamaForCausalLM.from_pretrained(
+                cache_path_4b, load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16, device_map=device if device else "auto"
+            )
     else:
         raise ValueError(f"Unknown model type: {model_name_or_path}")
-
-    if args.use_gpu:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if args.load_fp16:
-            pass
+    if device is None:
+        if args.use_gpu:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if args.load_fp16 or "llama" in model_name_or_path.lower():
+                pass
+            else:
+                model = model.to(device)
         else:
-            model = model.to(device)
-    else:
-        device = "cpu"
+            device = "cpu"
     model.eval()
 
     if args.is_decoder_only_model:
@@ -93,11 +118,7 @@ def load_model(args, attack_model=False):
         padding_side = None
     if "llama" in model_name_or_path:
         tokenizer = LlamaTokenizer.from_pretrained(
-            model_name_or_path, padding_side=padding_side
-        )
-        model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
-        model.config.bos_token_id = 1
-        model.config.eos_token_id = 2
+            model_name_or_path, add_eos_token=True)
     else:
         if padding_side:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -105,11 +126,13 @@ def load_model(args, attack_model=False):
             )
         else:
             tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     if hasattr(model.config, "max_position_embeddings"):
         args.model_max_length = model.config.max_position_embeddings
     else:
         args.model_max_length = 1024
-    model.to(device)
     return model, tokenizer, device
 
 
@@ -281,6 +304,38 @@ def check_output_lengths(example, min_output_len=0):
     )
     return conds
 
+from nltk.tokenize import sent_tokenize
+
+def find_sentence_endings(paragraphs: list[str], tokenizer, target_length, count_from_left=True) -> tuple[list[int]]:
+    """
+    Make the truncated input as short as possible.
+    Count_from_left=True: keep at least target_length tokens from the left
+    Count_from_left=False: remove at least target_length tokens from the right
+    """
+
+    # Assuming you have a function that finds sentence boundaries, like one from NLTK:
+    # Tokenize the text into sentences to find end positions
+    result = []
+    formatted_inputs=[]
+    for paragraph in paragraphs:
+        
+        keep_paragraph = ""
+        if not count_from_left:
+            whole_length = len(tokenizer.encode(
+                paragraph, add_special_tokens=False))
+            target_length = whole_length-target_length
+        sentences = sent_tokenize(paragraph)
+        formatted=" ".join(sentences)
+        formatted_inputs.append(formatted)
+        s = 0
+        for sentence in sentences:
+            s += len(tokenizer.encode(sentence, add_special_tokens=False))
+            keep_paragraph += sentence+" "
+            if s >= target_length:
+                break
+        result.append(keep_paragraph)
+    return result,formatted_inputs
+
 
 def tokenize_and_truncate(
     example: dict,
@@ -296,12 +351,13 @@ def tokenize_and_truncate(
     assert hf_model_name is not None, "need model name to know whether to adjust wrt special tokens"
     assert input_col_name in example, f"expects {input_col_name} field to be present"
     # tokenize
-    inputs_ids = tokenizer(example[input_col_name], return_tensors="pt")[
-        "input_ids"]
-    example.update({"untruncated_inputs": inputs_ids})
+    original_input = example[input_col_name]
+    if isinstance(original_input, str):
+        original_input = [original_input]
 
     if truncate_left:
         # truncate left
+        print("May be flawed since I changed the truncation!",file=sys.stderr)
         inputs_ids = inputs_ids[:, -model_max_length:]
         if example["untruncated_inputs"].shape != inputs_ids.shape:
             print(
@@ -313,10 +369,12 @@ def tokenize_and_truncate(
 
     if (completion_length is not None) and (prompt_length is None):
         # leave at least one token as prefix # FIXME I think plus 1 since 0 is start tok
-        slice_length = min(inputs_ids.shape[1] - 1, completion_length)
+        truncated_input,formatted = find_sentence_endings(
+            original_input, tokenizer, completion_length, count_from_left=False)
+
     elif (prompt_length is not None) and (completion_length is None):
-        desired_comp_len = (inputs_ids.shape[1] - 1) - prompt_length
-        slice_length = desired_comp_len if desired_comp_len > 0 else 0
+        truncated_input,formatted = find_sentence_endings(
+            original_input, tokenizer, prompt_length, count_from_left=True)
     else:
         raise ValueError(
             (
@@ -324,16 +382,17 @@ def tokenize_and_truncate(
                 f" but got completion_length:{completion_length},prompt_length:{prompt_length}",
             )
         )
-
-    # truncate
-    inputs_ids = inputs_ids[:, : inputs_ids.shape[1] - slice_length]
-    # logic depending on special tokens for the model
-    if "t5" in hf_model_name or "T0" in hf_model_name:
-        inputs_ids[0, -1] = 1
-    # else: pass
+    assert len(truncated_input) == len(formatted)==1
+    example.update({"untruncated_text":formatted[0]})
+    example.update({"truncated_text": truncated_input[0]})
+    # # truncate
+    inputs_ids = tokenizer(truncated_input, return_tensors="pt")["input_ids"]
+    # # logic depending on special tokens for the model
+    # if "t5" in hf_model_name or "T0" in hf_model_name:
+    #     inputs_ids[0, -1] = 1
+    # # else: pass
     example.update({"input_ids": inputs_ids})
     return example
-
 
 def tokenize_only(
     example: dict,
@@ -438,22 +497,17 @@ def tokenize_for_generation(
         inputs = example["input_ids"]
         prompt_len = inputs.shape[1]
         # for isolating the "gold" baseline completion
-        untruncated_inputs = example.pop("untruncated_inputs")
-        full_sample_len = untruncated_inputs.shape[1]
-        # decode the preprocessed input to store for audit
-        re_decoded_input = tokenizer.batch_decode(
-            inputs, skip_special_tokens=True)[0]
-        # also decode the original suffix of the input for audit as the baseline
-        baseline_completion_tokens = untruncated_inputs[:, inputs.shape[-1]:]
-        decoded_baseline_completion = tokenizer.batch_decode(
-            baseline_completion_tokens, skip_special_tokens=True
-        )[0]
+        untruncated_inputs = example.pop("untruncated_text")
+        full_sample_len = len(tokenizer(untruncated_inputs)["input_ids"])
+
+        truncated_text_len=len(example["truncated_text"])
+        baseline_completion = untruncated_inputs[truncated_text_len:]
+        
         baseline_completion_len = full_sample_len - prompt_len
 
     example.update(
         {
-            "truncated_input": re_decoded_input,
-            "baseline_completion": decoded_baseline_completion,
+            "baseline_completion": baseline_completion,
             "orig_sample_length": full_sample_len,
             "prompt_length": prompt_len,
             "baseline_completion_length": baseline_completion_len,
@@ -462,14 +516,17 @@ def tokenize_for_generation(
     return example
 
 
-def collate_batch(input_ids: list, collator: DataCollatorWithPadding = None):
+def collate_batch(input_ids: list, collator: DataCollatorWithPadding = None,id_only=True):
     """collate batch of input_ids into a padded batch of tensors"""
     assert (
         input_ids[0].shape[0] == 1 and input_ids[0].shape[1] > 0
     ), "expecting batch dimension of each tensor to be 1"
     # remove batch dimension for each tensor
     input_ids = [x.squeeze(0) for x in input_ids]
-    return collator({"input_ids": input_ids})["input_ids"]
+    if id_only:
+        return collator({"input_ids": input_ids})["input_ids"]
+    else:
+        return collator({"input_ids": input_ids})
 
 
 def generate(
@@ -481,23 +538,31 @@ def generate(
     tokenizer=None,
     device=None,
     args=None,
+    prompting=None,
 ):
     # exit()
+    trunc_input=examples["truncated_text"]
+    add_special_tokens=True
+    if prompting:
+        trunc_input=prompting(trunc_input)
+        add_special_tokens=False
     if data_collator is not None:
-        input_ids = collate_batch(
-            input_ids=examples["input_ids"], collator=data_collator).to(device)
+        batch_input = tokenizer(trunc_input, return_tensors="pt",
+                                padding=True,add_special_tokens=add_special_tokens)
+        input_ids=batch_input["input_ids"].to(device)
+        attention_mask=batch_input["attention_mask"].to(device)
     else:
-        input_ids = examples["input_ids"].to(device)
-
+        batch_input = examples["input_ids"].to(device)
+        attention_mask = None
     with torch.no_grad():
         if args.generation_seed is not None:
             torch.manual_seed(args.generation_seed)
         output_without_watermark = generate_without_watermark(
-            input_ids=input_ids)
+            input_ids=input_ids,attention_mask=attention_mask)
 
         if args.generation_seed is not None:
             torch.manual_seed(args.generation_seed)
-        output_with_watermark = generate_with_watermark(input_ids=input_ids)
+        output_with_watermark = generate_with_watermark(input_ids=input_ids,attention_mask=attention_mask)
 
     if args.is_decoder_only_model:
         # need to isolate the newly generated tokens
@@ -552,7 +617,7 @@ def get_generate_watermark(tokenizer, model, args):
     # Configure the generation partials
     ###########################################################################
 
-    gen_kwargs = dict(max_new_tokens=args.max_new_tokens)
+    gen_kwargs = dict(exponential_decay_length_penalty=(int(args.max_new_tokens), 1.05),max_new_tokens=args.max_new_tokens*1.2)
     # gen_kwargs.update(dict(exponential_decay_length_penalty=(100,1.01)))
         
 
@@ -729,8 +794,8 @@ if __name__ == "__main__":
     print(input_ids)
     generate_without_watermark, generate_with_watermark, watermark_processor = get_generate_watermark(tokenizer, model,
                                                                                                       args)
-    examples = generate(examples, None, generate_with_watermark,
-                        generate_without_watermark, watermark_processor, tokenizer, device, args)
+    examples = generate(examples, None, generate_without_watermark,
+                        generate_with_watermark, watermark_processor, tokenizer, device, args)
     # change dict of lists into list of dicts
     examples.pop("input_ids")
     examples = [dict(zip(examples, t)) for t in zip(*examples.values())]

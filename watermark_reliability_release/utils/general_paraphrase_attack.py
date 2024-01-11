@@ -16,7 +16,7 @@ from paraphrase_processor import ParaphraserLogitsProcessor
 
 
 @torch.no_grad()
-def generate_paraphrase_paraphrase(
+def generate_paraphrase(
     data,
     attack_prompt,
     start_idx=None,
@@ -119,8 +119,6 @@ def generate_paraphrase_paraphrase(
                     length_logits_processor, paraphrase_logits_processor, repetition_ending_processor],
                 repetition_penalty=args.attack_repetition_penalty,
                 length_penalty=args.attack_length_penalty,
-                encoder_no_repeat_ngram_size =args.paraphrase_ngram_horizon,
-                
             )
             outputs_length = torch.sum(
                 outputs != tokenizer.pad_token_id, dim=1)
@@ -138,8 +136,6 @@ def generate_paraphrase_paraphrase(
                                       repetition_ending_processor],
                     repetition_penalty=args.attack_repetition_penalty,
                     length_penalty=args.attack_length_penalty,
-                    encoder_no_repeat_ngram_size=args.paraphrase_ngram_horizon,
-
                 )
 
                 outputs_baseline_length = torch.sum(

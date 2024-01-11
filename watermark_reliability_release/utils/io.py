@@ -100,11 +100,12 @@ def load_jsonlines(filename: str) -> List[Mapping[str, Any]]:
 
 
 def write_jsonlines(
-    objs: Iterable[Mapping[str, Any]], filename: str, to_dict: Callable = lambda x: x
+    objs: Iterable[Mapping[str, Any]], filename: str, to_dict: Callable = lambda x: x,open_mode="w",verbose=True
 ):
     """Writes a list of Python Mappings as jsonlines at the input file."""
-    with open(filename, "w") as fp:
-        for obj in tqdm(objs, desc=f"Writing JSON lines at {filename}"):
+    wrapper=tqdm if verbose else lambda objs,desc:objs
+    with open(filename, open_mode) as fp:
+        for obj in wrapper(objs, desc=f"Writing JSON lines at {filename}"):
             fp.write(json.dumps(to_dict(obj)))
             fp.write("\n")
 
