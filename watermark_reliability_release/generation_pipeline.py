@@ -34,7 +34,7 @@ from transformers import LogitsProcessorList, DataCollatorWithPadding
 from utils.submitit import str2bool
 
 # some file i/o helpers
-from utils.io import write_jsonlines, write_json, dump_json_check_path
+from utils.io import write_jsonlines, write_json, dump_json_check_path, read_json
 
 # watermarking functionality
 from watermark_processor import WatermarkLogitsProcessor
@@ -48,11 +48,44 @@ from utils.generation import (
     check_output_lengths,
     tokenize_for_generation,
     generate,
-    get_generate_watermark
+    get_generate_watermark,
+    Prompting
 )
+
+model, tokenizer, device, generation_partial = None, None, None, None
+
+
+def prepare_partials(i, args, data_collator, prompting):
+    global model, tokenizer, device, generation_partial
+    if i is not None:
+        # FIXME Can it be more elegant?
+        torch.cuda.empty_cache()
+        model, tokenizer, device = load_model(
+            args, device=f"cuda:{i}")
+        model.eval()
+    generate_without_watermark, generate_with_watermark, watermark_processor = get_generate_watermark(tokenizer, model,
+                                                                                                      args)
+    generation_partial = partial(
+        generate,
+        data_collator=data_collator,
+        generate_without_watermark=generate_without_watermark,
+        generate_with_watermark=generate_with_watermark,
+        watermark_processor=watermark_processor,
+        tokenizer=tokenizer,
+        device=device,
+        args=args,
+        prompting=prompting
+    )
+
+
+def mp_wrapper(ex):
+    global generation_partial
+    return generation_partial(ex)
 
 
 def main(args):
+    from torch.multiprocessing import set_start_method
+    set_start_method("spawn")
     ###########################################################################
     # Start logging
     ###########################################################################
@@ -95,7 +128,7 @@ def main(args):
     # Instantiate model and tokenizer
     ###########################################################################
 
-    model, tokenizer, device = load_model(args)
+    model_config, tokenizer, device = load_model(args, config_only=True)
 
     ###########################################################################
     # Configure the prompt construction partial
@@ -118,7 +151,8 @@ def main(args):
         assert args.truncate_input_for_prompt == False, "Cannot truncate input for prompt if 'no_truncation' strategy is specified"
         pass
     else:
-        ValueError(f"Unknown input truncation strategy {args.input_truncation_strategy}")
+        ValueError(
+            f"Unknown input truncation strategy {args.input_truncation_strategy}")
     tokenize_prompts = partial(tokenize_for_generation, **token_kwargs)
 
     ###########################################################################
@@ -127,20 +161,23 @@ def main(args):
 
     input_check_kwargs = dict(
         min_sample_len=args.min_sample_tokens,
-        max_input_len=model.config.max_position_embeddings,
+        max_input_len=model_config.max_position_embeddings,
         max_new_tokens=args.max_new_tokens,
     )
     if args.input_filtering_strategy == "prompt_length":
-        input_check_kwargs.update(dict(min_prompt_len=args.min_prompt_tokens, min_completion_len=0))
+        input_check_kwargs.update(
+            dict(min_prompt_len=args.min_prompt_tokens, min_completion_len=0))
     elif args.input_filtering_strategy == "completion_length":
-        input_check_kwargs.update(dict(min_prompt_len=0, min_completion_len=args.max_new_tokens))
+        input_check_kwargs.update(
+            dict(min_prompt_len=0, min_completion_len=args.max_new_tokens))
     elif args.input_filtering_strategy == "prompt_and_completion_length":
         input_check_kwargs.update(dict(
             min_prompt_len=args.min_prompt_tokens, min_completion_len=args.max_new_tokens))
     elif args.input_filtering_strategy == "no_filter":
         input_check_kwargs.update(dict(min_prompt_len=0, min_completion_len=0))
     else:
-        ValueError(f"Unknown input filtering strategy {args.input_filtering_strategy}")
+        ValueError(
+            f"Unknown input filtering strategy {args.input_filtering_strategy}")
     input_check = partial(check_input_lengths, **input_check_kwargs)
 
     if args.output_filtering_strategy == "max_new_tokens":
@@ -148,47 +185,67 @@ def main(args):
     elif args.output_filtering_strategy == "no_filter":
         output_kwargs = dict(min_output_len=0)
     else:
-        ValueError(f"Unknown output filtering strategy {args.output_filtering_strategy}")
+        ValueError(
+            f"Unknown output filtering strategy {args.output_filtering_strategy}")
     output_check = partial(check_output_lengths, **output_kwargs)
 
-    generate_without_watermark, generate_with_watermark, watermark_processor = get_generate_watermark(tokenizer, model,
-                                                                                                      args)
+    if tokenizer.pad_token_id is None:
+        data_collator = DataCollatorWithPadding(
+            tokenizer=tokenizer, padding=False)
+    else:
+        # construct the collator
+        data_collator = DataCollatorWithPadding(
+            tokenizer=tokenizer, padding=True, pad_to_multiple_of=8)
+    if "mistral" in args.model_name_or_path.lower():
+        prompt = read_json("utils/prompts.json")["generation_prompt"]["0"]
+        prompting = Prompting(tokenizer, prompt)
 
-    # construct the collator
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding=True, pad_to_multiple_of=8)
-
-    generation_partial = partial(
-        generate,
-        data_collator=data_collator,
-        generate_without_watermark=generate_without_watermark,
-        generate_with_watermark=generate_with_watermark,
-        watermark_processor=watermark_processor,
-        tokenizer=tokenizer,
-        device=device,
-        args=args,
-    )
-
-    ###########################################################################
-    # Compose the partials to create the pipeline
-    ###########################################################################
+    else:
+        prompting = None
 
     # tokenize and truncate the row inputs to create prompts according to the strategy spec'd above
     dataset_w_prompts = dataset.map(tokenize_prompts, batched=False)
 
     # filter the rows of the dataset based on length checks for the tokenized prompts and baseline completions
-    dataset_input_len_filtered = dataset_w_prompts.filter(input_check, batched=False)
+    dataset_input_len_filtered = dataset_w_prompts.filter(
+        input_check, batched=False)
+
 
     # need to remove the input tensor column after this map
     # bc it persists between the prompt creation and generation maps
     columns_to_remove = args.columns_to_remove + ["input_ids"]
+    dataset_input_len_filtered = dataset_input_len_filtered.remove_columns(
+        columns_to_remove)
 
-    # call the generation partial on each prompt in the dataset
-    dataset_w_generations = dataset_input_len_filtered.map(
-        generation_partial,
-        batched=True,
-        batch_size=args.generation_batch_size,
-        remove_columns=columns_to_remove,
-    )
+    ###########################################################################
+    # Compose the partials to create the pipeline
+    ###########################################################################
+
+    from torch.multiprocessing import Pool
+    from datasets import Dataset
+    from torch.utils.data import DataLoader
+    # load model on each device instead
+    device_count = torch.cuda.device_count()
+
+    def dataset_w_generations():
+        global generation_partial
+
+        with Pool(device_count) as p:
+            p.map(partial(prepare_partials, args=args, data_collator=data_collator, prompting=prompting
+                          ), range(device_count))
+            for result in p.imap(
+                mp_wrapper, 
+                # dataset_input_len_filtered
+                DataLoader(
+                    dataset_input_len_filtered, 
+                    batch_size=args.generation_batch_size, 
+                    collate_fn=lambda x: Dataset.from_list(x).to_dict(),
+                    )
+                ):
+                result = Dataset.from_dict(result).to_list()
+                
+                for i in result:
+                    yield i
 
     ###########################################################################
     # Main loop - actually executes the generation pipeline.
@@ -197,7 +254,7 @@ def main(args):
     ###########################################################################
 
     processed_examples = []
-    ds_iterator = iter(dataset_w_generations)
+    ds_iterator = dataset_w_generations()
     i = 0
     total_steps = 0
     pbar = tqdm(total=args.min_generations)
@@ -214,14 +271,15 @@ def main(args):
             print(f"dataset index: {ex['idx']}")
             print(f"orig_sample_length: {ex['orig_sample_length']}")
             print(f"prompt_length: {ex['prompt_length']}")
-            print(f"real_completion_length: {ex['baseline_completion_length']}")
+            print(
+                f"real_completion_length: {ex['baseline_completion_length']}")
             print(f"no_wm_output_length: {ex['no_wm_output_length']}")
             print(f"w_wm_output_length: {ex['w_wm_output_length']}")
 
             print(f"\ntruncated_input: ")
-            print(ex["truncated_input"])
+            print(ex["truncated_text"])
             print(f"\nbaseline_completion: ")
-            print(ex["baseline_completion"])
+            print(ex["baseline_completion"][:500], "...")
             print(f"\nno_wm_output: ")
             print(ex["no_wm_output"])
             print(f"\nw_wm_output: ")
@@ -392,7 +450,8 @@ if __name__ == "__main__":
         "--input_filtering_strategy",
         type=str,
         default="completion_length",
-        choices=["no_filter", "completion_length", "prompt_length", "prompt_and_completion_length"],
+        choices=["no_filter", "completion_length",
+                 "prompt_length", "prompt_and_completion_length"],
         help="The strategy to use when tokenizing and truncating raw inputs to make prompts.",
     )
     parser.add_argument(
@@ -531,13 +590,20 @@ if __name__ == "__main__":
         default=False,
         help="Allow overwriting of old generation files at the same output location.",
     )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        default=False,
+        help="Whether to use parallel generation.",
+    )
     args = parser.parse_args()
 
     ###########################################################################
     # Argument validation and conditional setting
     ###########################################################################
     # for removing some columns to save space
-    args.columns_to_remove = args.columns_to_remove.split(",") if args.columns_to_remove else []
+    args.columns_to_remove = args.columns_to_remove.split(
+        ",") if args.columns_to_remove else []
 
     # if decoding scheme is not sampling, then set generation seed to None
     # to avoid confusion and calling the torch rng unnecessarily
@@ -553,7 +619,8 @@ if __name__ == "__main__":
     if args.limit_indices is None:
         print("No limit_indices specified, pulling all examples from the dataset.")
     else:
-        print(f"Limiting iteration to {args.limit_indices} examples from the dataset.")
+        print(
+            f"Limiting iteration to {args.limit_indices} examples from the dataset.")
 
     # split wandb tags
     if args.wandb_tags != "":

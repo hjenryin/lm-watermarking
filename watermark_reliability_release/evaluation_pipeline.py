@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import torch.fx
 from datasets import disable_caching
 from utils.evaluation import (
     SUPPORTED_METRICS,
@@ -320,9 +320,11 @@ def main(args):
             keep_in_memory=True,
         )
 
-        # clear the model just for fun
-        oracle_model = oracle_model.to(torch.device("cpu"))
-        del oracle_model
+        # # clear the model just for fun
+        # oracle_model = oracle_model.to(torch.device("cpu"))
+        # del oracle_model
+        # HAHA very funny
+        # But I was using bitsandbytes, so it can't be moved
     else:
         gen_table_w_ppl_ds = gen_table_concated_ds
 

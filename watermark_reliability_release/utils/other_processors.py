@@ -32,13 +32,20 @@ class LineBreakLogitsProcessor(LogitsProcessor):
         # https://github.com/huggingface/transformers/issues/26273
         self.lb=self.lb[-1]
         self.min_len=min_len
+        self.debug_cache=None
     
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if input_ids.shape[1]<self.min_len+2:
             return scores
         consecutive_lb=(input_ids[:,-1]==self.lb)&(input_ids[:,-2]==self.lb)
+
         scores[consecutive_lb,:]=float("-inf")
         scores[consecutive_lb,self.eos]=1
+        # This should be the correct way to do it, but this will cause RuntimeError: probability tensor contains either `inf`, `nan` or element < 0 sometimes.
+        # This is an huggingface issue.
+        # scores[consecutive_lb,self.eos]+=1e6
+
+        self.debug_cache=(scores,consecutive_lb)
         return scores
         
         

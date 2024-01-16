@@ -85,7 +85,7 @@ SUPPORTED_METRICS = [
 # These are the output text columns we want to compute metrics on
 OUTPUT_TEXT_COLUMN_NAMES = [
     # "baseline_completion",
-    "no_wm_output",
+    # "no_wm_output",
     "w_wm_output",
     "w_wm_output_attacked",
     "w_wm_output_attacked_baseline",
@@ -96,7 +96,7 @@ ZSCORE_TEXT_COLUMN_NAMES = OUTPUT_TEXT_COLUMN_NAMES
 RUN_LEN_CHISQRD_TEXT_COLUMN_NAMES = OUTPUT_TEXT_COLUMN_NAMES
 REPETITION_TEXT_COLUMN_NAMES = OUTPUT_TEXT_COLUMN_NAMES
 # note the convention of including the input as 0th column
-COHERENCE_TEXT_COLUMN_NAMES = ["truncated_input"] + OUTPUT_TEXT_COLUMN_NAMES
+COHERENCE_TEXT_COLUMN_NAMES = ["truncated_text"] + OUTPUT_TEXT_COLUMN_NAMES
 
 # These are the column pairs we want to compute p-sp for
 OUTPUT_TEXT_PAIR_COLUMN_NAMES = [
@@ -386,27 +386,12 @@ def compute_run_len_chsqrd_stats(
 
 
 def load_oracle_model(args):
-    oracle_model_name = args.oracle_model_name_or_path
-    print(f"Loading oracle model: {oracle_model_name}")
-    if args.load_fp16:
-        oracle_model = AutoModelForCausalLM.from_pretrained(
-            oracle_model_name, torch_dtype=torch.float16, device_map="auto"
-        )
-    else:
-        oracle_model = AutoModelForCausalLM.from_pretrained(oracle_model_name)
-    if "llama" in oracle_model_name:
-        oracle_tokenizer = LlamaTokenizer.from_pretrained(oracle_model_name)
-        oracle_model.config.pad_token_id = oracle_tokenizer.pad_token_id = 0  # unk
-        oracle_model.config.bos_token_id = 1
-        oracle_model.config.eos_token_id = 2
-    else:
-        oracle_tokenizer = AutoTokenizer.from_pretrained(oracle_model_name)
-    if args.use_gpu:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if not args.load_fp16:
-            oracle_model = oracle_model.to(device)
-    else:
-        device = "cpu"
+    import copy
+    new_args = copy.deepcopy(args)
+    new_args.model_name_or_path = args.oracle_model_name_or_path
+    print(f"Loading oracle model: {new_args.model_name_or_path}")
+    from utils.generation import load_model
+    oracle_model, oracle_tokenizer, device = load_model(new_args)
     oracle_model.eval()
 
     return oracle_model, oracle_tokenizer, device
@@ -437,11 +422,11 @@ UNPOOL_FN_TABLE = {
 
 
 def get_unpool_fn(model_name):
-    if "opt" in model_name:
-        return UNPOOL_FN_TABLE["opt"]
-    else:
-        raise NotImplementedError(
-            f"unpooling function not implemented for {model_name}")
+    return UNPOOL_FN_TABLE["opt"]
+    # if "opt" in model_name:
+    # else:
+        # raise NotImplementedError(
+        #     f"unpooling function not implemented for {model_name}")
 
 
 def compute_ppl_batch(
@@ -455,23 +440,10 @@ def compute_ppl_batch(
     inputs = []
     labels = []
     for idx in range(len(prefix_and_output_text)):
-        tokd_prefix = tokenize_and_truncate(
-            {"text": prefix_and_output_text[idx]},
-            completion_length=0,
-            hf_model_name=oracle_model_name,
-            tokenizer=oracle_tokenizer,
-            # we add this to cover if the generation is longer than the oracle's max length
-            truncate_left=True,
-            model_max_length=oracle_model.config.max_position_embeddings,
-        )["input_ids"]
+        tokd_prefix = oracle_tokenizer(prefix_and_output_text[idx],return_tensors="pt")["input_ids"]
 
         # if only want to score the "generation" part we need the suffix tokenization length
-        tokd_suffix = tokenize_and_truncate(
-            {"text": output_text[idx]},
-            completion_length=0,
-            hf_model_name=oracle_model_name,
-            tokenizer=oracle_tokenizer,
-        )["input_ids"]
+        tokd_suffix = oracle_tokenizer(output_text[idx],return_tensors="pt")["input_ids"]
 
         tokd_labels = tokd_prefix.clone().detach()
         tokd_labels[:, : tokd_labels.shape[1] -
@@ -520,32 +492,32 @@ def evaluate_ppl(
     inputs_plus_w_wm_output_attacked_baselines = []
     w_wm_output_attacked_baselines = []
 
-    for idx in range(len(examples["truncated_input"])):
+    for idx in range(len(examples["truncated_text"])):
         # pull out the required fields from the pipeline results
         inputs_plus_baseline_output = (
-            f"{examples['truncated_input'][idx]}{examples['baseline_completion'][idx]}"
+            f"{examples['truncated_text'][idx]}{examples['baseline_completion'][idx]}"
         )
         baseline_output = f"{examples['baseline_completion'][idx]}"
 
         inputs_plus_no_wm_output = (
-            f"{examples['truncated_input'][idx]}{examples['no_wm_output'][idx]}"
+            f"{examples['truncated_text'][idx]}{examples['no_wm_output'][idx]}"
         )
         no_wm_output = f"{examples['no_wm_output'][idx]}"
 
         inputs_plus_w_wm_output = (
-            f"{examples['truncated_input'][idx]}{examples['w_wm_output'][idx]}"
+            f"{examples['truncated_text'][idx]}{examples['w_wm_output'][idx]}"
         )
         w_wm_output = f"{examples['w_wm_output'][idx]}"
 
         if "w_wm_output_attacked" in examples:
             inputs_plus_w_wm_output_attacked = (
-                f"{examples['truncated_input'][idx]}{examples['w_wm_output_attacked'][idx]}"
+                f"{examples['truncated_text'][idx]}{examples['w_wm_output_attacked'][idx]}"
             )
             w_wm_output_attacked = f"{examples['w_wm_output_attacked'][idx]}"
 
         if "w_wm_output_attacked_baseline" in examples:
             inputs_plus_w_wm_output_attacked_baseline = (
-                f"{examples['truncated_input'][idx]}{examples['w_wm_output_attacked_baseline'][idx]}"
+                f"{examples['truncated_text'][idx]}{examples['w_wm_output_attacked_baseline'][idx]}"
             )
             w_wm_output_attacked_baseline = f"{examples['w_wm_output_attacked_baseline'][idx]}"
 
@@ -568,38 +540,38 @@ def evaluate_ppl(
                 w_wm_output_attacked_baseline)
 
     # add metrics
-    loss, ppl = compute_ppl_batch(
-        inputs_plus_baseline_outputs,
-        baseline_outputs,
-        oracle_model_name,
-        oracle_model,
-        oracle_tokenizer,
-        data_collator=data_collator,
-    )
-    examples["baseline_completion_loss"] = loss
-    examples["baseline_completion_ppl"] = ppl
+    # loss, ppl = compute_ppl_batch(
+    #     inputs_plus_baseline_outputs,
+    #     baseline_outputs,
+    #     oracle_model_name,
+    #     oracle_model,
+    #     oracle_tokenizer,
+    #     data_collator=data_collator,
+    # )
+    # examples["baseline_completion_loss"] = loss
+    # examples["baseline_completion_ppl"] = ppl
 
-    loss, ppl = compute_ppl_batch(
-        inputs_plus_no_wm_outputs,
-        no_wm_outputs,
-        oracle_model_name,
-        oracle_model,
-        oracle_tokenizer,
-        data_collator=data_collator,
-    )
-    examples["no_wm_output_loss"] = loss
-    examples["no_wm_output_ppl"] = ppl
+    # loss, ppl = compute_ppl_batch(
+    #     inputs_plus_no_wm_outputs,
+    #     no_wm_outputs,
+    #     oracle_model_name,
+    #     oracle_model,
+    #     oracle_tokenizer,
+    #     data_collator=data_collator,
+    # )
+    # examples["no_wm_output_loss"] = loss
+    # examples["no_wm_output_ppl"] = ppl
 
-    loss, ppl = compute_ppl_batch(
-        inputs_plus_w_wm_outputs,
-        w_wm_outputs,
-        oracle_model_name,
-        oracle_model,
-        oracle_tokenizer,
-        data_collator=data_collator,
-    )
-    examples["w_wm_output_loss"] = loss
-    examples["w_wm_output_ppl"] = ppl
+    # loss, ppl = compute_ppl_batch(
+    #     inputs_plus_w_wm_outputs,
+    #     w_wm_outputs,
+    #     oracle_model_name,
+    #     oracle_model,
+    #     oracle_tokenizer,
+    #     data_collator=data_collator,
+    # )
+    # examples["w_wm_output_loss"] = loss
+    # examples["w_wm_output_ppl"] = ppl
 
     if "w_wm_output_attacked" in examples:
         loss, ppl = compute_ppl_batch(

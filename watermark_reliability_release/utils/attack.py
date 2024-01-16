@@ -17,10 +17,11 @@
 import random
 import time
 import openai
+import os
 
 from utils.dipper_attack_pipeline import generate_dipper_paraphrases
 from utils.general_paraphrase_attack import generate_paraphrase
-from utils.io import write_jsonlines
+from utils.io import write_jsonlines,read_jsonlines 
 
 from utils.evaluation import OUTPUT_TEXT_COLUMN_NAMES
 from utils.copy_paste_attack import single_insertion, triple_insertion_single_len, k_insertion_t_len
@@ -191,7 +192,13 @@ def general_paraphrase_attack(data, attack_prompt=None, args=None,yielding=False
     else:
         assert "llama" in args.attack_model_name.lower()
         from utils.llama_paraphrase_attack_full_length_yield import llama_paraphrase
-        ds= llama_paraphrase(data, attack_prompt=attack_prompt, args=args)
+        if os.path.exists(args.output_dir+"/llama_yield_temp.jsonl"):
+            recover=read_jsonlines(args.output_dir+"/llama_yield_temp.jsonl")
+            recover=list(recover)
+            os.rename(args.output_dir+"/llama_yield_temp.jsonl",args.output_dir+"/llama_yield_temp.jsonl.bak")
+        else:
+            recover=None
+        ds= llama_paraphrase(data, attack_prompt=attack_prompt, args=args,recover=recover)
         results=[]
         while True:
             try:

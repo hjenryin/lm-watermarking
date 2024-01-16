@@ -19,10 +19,10 @@ from functools import partial
 
 # HF classes
 
+import sys
 from datasets import load_dataset, IterableDataset
 from transformers import LogitsProcessorList
 if __name__ == "__main__":
-    import sys
     sys.path.append("../")
     from data.lfqa import load_lfqa
     from data.essays import load_essays
@@ -41,8 +41,11 @@ from transformers import (
     LlamaTokenizer,
     AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
+    AutoConfig,
     DataCollatorWithPadding,
     LlamaForCausalLM,
+    PreTrainedModel,
+    PretrainedConfig
 )
 
 
@@ -50,9 +53,27 @@ from utils.io import dump_json_check_path
 
 MAX_GENERATIONS = int(10000)  # Hardcoded max length to avoid infinite loop
 
+class Prompting:
+    def __init__(self,tokenizer,prompt):
+        self.tokenizer=tokenizer
+        self.prompt=prompt
+    def __call__(self,input_texts):
+        prompts=[self.prompt+[{
+            "role": "user",
+            "content": it
+        }] for it in input_texts]
+        return [self.tokenizer.apply_chat_template(p,tokenize=False) for p in prompts]
 
-def load_model(args, attack_model=False,device=None):
+def load_model(args, attack_model=False,device=None,config_only=False):
     """Load and return the model and tokenizer"""
+    if config_only:
+        CausalModel=AutoConfig
+        LlamaModel=AutoConfig
+        Seq2SeqModel=AutoConfig
+    else:
+        CausalModel=AutoModelForCausalLM
+        LlamaModel=LlamaForCausalLM
+        Seq2SeqModel=AutoModelForSeq2SeqLM
     if not attack_model:
         model_name_or_path = args.model_name_or_path
     else:
@@ -69,36 +90,41 @@ def load_model(args, attack_model=False,device=None):
          for model_type in ["gpt", "opt", "bloom", "llama","mistral","dolly"]]
     )
     if args.is_seq2seq_model:
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name_or_path)
+        model = Seq2SeqModel.from_pretrained(model_name_or_path)
     elif args.is_decoder_only_model and not "llama" in model_name_or_path.lower():
         
         if "7b" in model_name_or_path.lower():
             if not os.path.exists(cache_path_4b):
-                model = AutoModelForCausalLM.from_pretrained(
+                model = CausalModel.from_pretrained(
                     model_name_or_path, load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,device_map=device if device else "auto"
                 )
                 os.makedirs(os.path.dirname(cache_path_4b),exist_ok=True)
-                # model.save_pretrained(cache_path_4b)
+                model.save_pretrained(cache_path_4b)
             else:
-                model = AutoModelForCausalLM.from_pretrained(
+                model = CausalModel.from_pretrained(
                     cache_path_4b, load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16, device_map=device if device else "auto")
+            
         elif args.load_fp16:
-            model = AutoModelForCausalLM.from_pretrained(
+            model = CausalModel.from_pretrained(
                 model_name_or_path, torch_dtype=torch.float16, device_map="auto"
             )
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+            model = CausalModel.from_pretrained(model_name_or_path)
     elif "llama" in model_name_or_path.lower():
         if not os.path.exists(cache_path_4b):
-            model = LlamaForCausalLM.from_pretrained(
+            model = LlamaModel.from_pretrained(
                 model_name_or_path, load_in_4bit=True,bnb_4bit_compute_dtype=torch.float16,device_map=device if device else "auto"
             )
+            
             os.makedirs(os.path.dirname(cache_path_4b),exist_ok=True)
-            # model.save_pretrained(cache_path_4b)
+            model.save_pretrained(cache_path_4b)
         else:
-            model = LlamaForCausalLM.from_pretrained(
+            model = LlamaModel.from_pretrained(
                 cache_path_4b, load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16, device_map=device if device else "auto"
             )
+        # unset temperature and top_p
+
+        
     else:
         raise ValueError(f"Unknown model type: {model_name_or_path}")
     if device is None:
@@ -110,7 +136,8 @@ def load_model(args, attack_model=False,device=None):
                 model = model.to(device)
         else:
             device = "cpu"
-    model.eval()
+    if not config_only:
+        model.eval()
 
     if args.is_decoder_only_model:
         padding_side = "left"
@@ -129,8 +156,14 @@ def load_model(args, attack_model=False,device=None):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    if hasattr(model.config, "max_position_embeddings"):
-        args.model_max_length = model.config.max_position_embeddings
+    # print(tokenizer.pad_token_id)
+    # print(tokenizer.pad_token)
+    if config_only:
+        model_config=model
+    else:
+        model_config=model.config
+    if hasattr(model_config, "max_position_embeddings"):
+        args.model_max_length = model_config.max_position_embeddings
     else:
         args.model_max_length = 1024
     return model, tokenizer, device
@@ -306,11 +339,12 @@ def check_output_lengths(example, min_output_len=0):
 
 from nltk.tokenize import sent_tokenize
 
-def find_sentence_endings(paragraphs: list[str], tokenizer, target_length, count_from_left=True) -> tuple[list[int]]:
+def find_sentence_endings(paragraphs: list[str], tokenizer, target_length, count_from_left=True,flipped=False) -> tuple[list[int]]:
     """
     Make the truncated input as short as possible.
     Count_from_left=True: keep at least target_length tokens from the left
     Count_from_left=False: remove at least target_length tokens from the right
+    flipped=True: reverse the truncation and result. This is useful for the oracle.
     """
 
     # Assuming you have a function that finds sentence boundaries, like one from NLTK:
@@ -328,11 +362,16 @@ def find_sentence_endings(paragraphs: list[str], tokenizer, target_length, count
         formatted=" ".join(sentences)
         formatted_inputs.append(formatted)
         s = 0
-        for sentence in sentences:
+        while len(sentences) > 0:
+            sentence = sentences.pop(0)
             s += len(tokenizer.encode(sentence, add_special_tokens=False))
             keep_paragraph += sentence+" "
             if s >= target_length:
-                break
+                if not flipped:
+                    break
+                else:
+                    keep_paragraph = " ".join(sentences)+" "
+        
         result.append(keep_paragraph)
     return result,formatted_inputs
 
@@ -357,15 +396,15 @@ def tokenize_and_truncate(
 
     if truncate_left:
         # truncate left
-        print("May be flawed since I changed the truncation!",file=sys.stderr)
         inputs_ids = inputs_ids[:, -model_max_length:]
-        if example["untruncated_inputs"].shape != inputs_ids.shape:
+        diff=example
+        if example["untruncated_text"].shape != inputs_ids.shape:
             print(
                 "Input too long for model! ",
                 "Left truncating under assumption that this is the prompt+output ",
                 "to be fed to the *oracle* model",
             )
-        example.update({"untruncated_inputs": inputs_ids})
+        example.update({"untruncated_text": inputs_ids})
 
     if (completion_length is not None) and (prompt_length is None):
         # leave at least one token as prefix # FIXME I think plus 1 since 0 is start tok

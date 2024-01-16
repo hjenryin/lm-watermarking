@@ -327,7 +327,7 @@ def main(args):
             print(f"\ntruncated_input: ")
             print(ex["truncated_input"])
             print(f"\nbaseline_completion: ")
-            print(ex["baseline_completion"])
+            print(ex["baseline_completion"][:500],"...")
             print(f"\nno_bl_output: ")
             print(ex["no_bl_output"])
             print(f"\nw_bl_output: ")

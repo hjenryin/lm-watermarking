@@ -5,7 +5,6 @@ import os
 import functools
 import sys
 import numpy as np
-import openai
 import re
 import string
 import collections as cll
